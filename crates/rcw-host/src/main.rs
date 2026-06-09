@@ -343,17 +343,7 @@ async fn execute_command(
         COMMAND_KEYBOARD_KEY => {
             command_keyboard_key(sink, &request_id, session_id.clone(), payload.args).await
         }
-        _ => {
-            send_error(
-                sink,
-                Some(request_id.clone()),
-                session_id.clone(),
-                ErrorCode::UnsupportedCommand,
-                ErrorCode::UnsupportedCommand.message(),
-            )
-            .await?;
-            Err(anyhow!("unsupported command"))
-        }
+        _ => Err(anyhow!("unsupported command")),
     };
 
     let ok = result.is_ok();
@@ -378,16 +368,31 @@ async fn execute_command(
             "command failed after {} ms: {err}",
             started.elapsed().as_millis()
         );
+        let code = error_code_for_command_error(err);
         let _ = send_error(
             sink,
             Some(request_id.clone()),
             session_id.clone(),
-            ErrorCode::CommandFailed,
+            code,
             &err.to_string(),
         )
         .await;
     }
     Ok(())
+}
+
+fn error_code_for_command_error(err: &anyhow::Error) -> ErrorCode {
+    let is_unsupported = err.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("only supported on Windows host builds")
+            || message.contains("unsupported command")
+            || message.contains("only png screenshots are supported")
+    });
+    if is_unsupported {
+        ErrorCode::UnsupportedCommand
+    } else {
+        ErrorCode::CommandFailed
+    }
 }
 
 async fn command_exec(
@@ -449,9 +454,8 @@ async fn command_exec(
         send_output(sink, request_id, session_id.clone(), &stream, &data).await?;
     }
 
-    send_complete_kind(
+    send_complete(
         sink,
-        TYPE_DOWNLOAD_COMPLETE,
         request_id,
         session_id,
         CommandCompletePayload {
@@ -515,8 +519,9 @@ async fn command_download(
     let bytes = std::fs::read(&args.remote_path)?;
     let sha256 = sha256_bytes(&bytes);
     send_binary_chunks(sink, request_id, BinaryKind::DownloadChunk, &bytes).await?;
-    send_complete(
+    send_complete_kind(
         sink,
+        TYPE_DOWNLOAD_COMPLETE,
         request_id,
         session_id,
         CommandCompletePayload {
@@ -539,15 +544,7 @@ async fn command_screenshot(
 ) -> Result<()> {
     let args: ScreenshotArgs = serde_json::from_value(args)?;
     if args.format != "png" {
-        send_error(
-            sink,
-            Some(request_id.to_owned()),
-            session_id,
-            ErrorCode::UnsupportedCommand,
-            "only png screenshots are supported",
-        )
-        .await?;
-        return Err(anyhow!("unsupported screenshot format"));
+        return Err(anyhow!("only png screenshots are supported"));
     }
     let bytes = platform::screenshot_png(args.display)?;
     let sha256 = sha256_bytes(&bytes);
@@ -977,5 +974,30 @@ fn append_host_audit(
     audit.result = result.map(str::to_owned);
     if let Err(err) = append_jsonl(&context.audit_path, &audit) {
         warn!("failed to write host audit log: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn platform_unsupported_errors_use_unsupported_command_code() {
+        let err = anyhow!("mouse input is only supported on Windows host builds");
+
+        assert!(matches!(
+            error_code_for_command_error(&err),
+            ErrorCode::UnsupportedCommand
+        ));
+    }
+
+    #[test]
+    fn generic_execution_errors_use_command_failed_code() {
+        let err = anyhow!("process exited with status 1");
+
+        assert!(matches!(
+            error_code_for_command_error(&err),
+            ErrorCode::CommandFailed
+        ));
     }
 }

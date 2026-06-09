@@ -63,6 +63,7 @@ struct ServerState {
     sessions: Mutex<HashMap<String, SessionState>>,
     pending_open: Mutex<HashMap<String, PendingOpen>>,
     request_routes: Mutex<HashMap<String, String>>,
+    request_controllers: Mutex<HashMap<String, Tx>>,
     host_registrations: Mutex<HashMap<String, VecDeque<Instant>>>,
     auth_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
@@ -110,6 +111,7 @@ async fn main() -> Result<()> {
             sessions: Mutex::new(HashMap::new()),
             pending_open: Mutex::new(HashMap::new()),
             request_routes: Mutex::new(HashMap::new()),
+            request_controllers: Mutex::new(HashMap::new()),
             host_registrations: Mutex::new(HashMap::new()),
             auth_attempts: Mutex::new(HashMap::new()),
         }),
@@ -446,20 +448,37 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
         warn!("host response without session_id from {machine_id}");
         return;
     };
-    let controller_tx = {
+    let mut controller_tx = if let Some(request_id) = &request_id {
+        let controllers = state.inner.request_controllers.lock().await;
+        controllers.get(request_id).cloned()
+    } else {
+        None
+    };
+    if controller_tx.is_none() {
         let sessions = state.inner.sessions.lock().await;
-        sessions
+        controller_tx = sessions
             .get(&session_id)
             .filter(|session| session.machine_id == machine_id)
-            .and_then(|session| session.controller_tx.clone())
-    };
+            .and_then(|session| session.controller_tx.clone());
+    }
+    debug!(
+        kind = %message.kind,
+        request_id = ?request_id,
+        session_id = %session_id,
+        machine_id = %machine_id,
+        has_controller = controller_tx.is_some(),
+        terminal = is_terminal,
+        "relaying host text response"
+    );
     if let Some(tx) = controller_tx {
         send_text(&tx, message);
-    }
+    };
     if is_terminal {
         if let Some(request_id) = request_id {
             let mut routes = state.inner.request_routes.lock().await;
             routes.remove(&request_id);
+            let mut controllers = state.inner.request_controllers.lock().await;
+            controllers.remove(&request_id);
         }
     }
 }
@@ -483,16 +502,28 @@ async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: V
         );
         return;
     };
-    let controller_tx = {
+    let mut controller_tx = {
+        let controllers = state.inner.request_controllers.lock().await;
+        controllers.get(&frame.request_id).cloned()
+    };
+    if controller_tx.is_none() {
         let sessions = state.inner.sessions.lock().await;
-        sessions
+        controller_tx = sessions
             .get(&session_id)
             .filter(|session| session.machine_id == machine_id)
-            .and_then(|session| session.controller_tx.clone())
-    };
+            .and_then(|session| session.controller_tx.clone());
+    }
+    debug!(
+        request_id = %frame.request_id,
+        session_id = %session_id,
+        machine_id = %machine_id,
+        bytes = bytes.len(),
+        has_controller = controller_tx.is_some(),
+        "relaying host binary response"
+    );
     if let Some(tx) = controller_tx {
         send_binary(&tx, bytes);
-    }
+    };
 }
 
 async fn handle_control_socket(socket: WebSocket, state: AppState) {
@@ -996,9 +1027,15 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
         let mut routes = state.inner.request_routes.lock().await;
         routes.insert(request_id_value.clone(), session.session_id.clone());
     }
+    {
+        let mut controllers = state.inner.request_controllers.lock().await;
+        controllers.insert(request_id_value.clone(), tx.clone());
+    }
     if host_tx.send(Outbound::Text(message)).is_err() {
         let mut routes = state.inner.request_routes.lock().await;
         routes.remove(&request_id_value);
+        let mut controllers = state.inner.request_controllers.lock().await;
+        controllers.remove(&request_id_value);
         send_error(
             tx,
             request_id,

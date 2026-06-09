@@ -398,7 +398,7 @@ async fn exec_command(cli: &Cli, request_id: &str, command: &[String]) -> Result
     }
     let wait = wait_timeout(cli)?;
     let remote_timeout_ms = wait.as_millis().min(u64::MAX as u128) as u64;
-    let response = send_command_with_frames(
+    let response = send_command(
         cli,
         request_id,
         COMMAND_EXEC,
@@ -641,26 +641,6 @@ async fn send_command_with_terminal(
         args,
         Vec::new(),
         terminal_kinds,
-        wait,
-    )
-    .await
-}
-
-async fn send_command_with_frames(
-    cli: &Cli,
-    request_id: &str,
-    command: &str,
-    args: Value,
-    binary_frames: Vec<Vec<u8>>,
-    wait: Duration,
-) -> Result<CommandResponse> {
-    send_command_with_frames_and_terminal(
-        cli,
-        request_id,
-        command,
-        args,
-        binary_frames,
-        &[TYPE_COMMAND_COMPLETE],
         wait,
     )
     .await
