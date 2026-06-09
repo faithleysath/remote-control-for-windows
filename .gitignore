@@ -1,0 +1,7 @@
+/target/
+*.pdb
+*.exe
+*.log
+*.jsonl
+session.json
+screen.png
