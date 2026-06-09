@@ -14,9 +14,12 @@ use rcw_common::{
         ErrorCode, ErrorPayload, ExecArgs, HostAuthResultPayload, HostHelloPayload,
         HostSessionClosedPayload, HostSessionOpenedPayload, KeyboardKeyArgs, KeyboardTypeArgs,
         MouseClickArgs, MouseMoveArgs, MouseScrollArgs, ScreenshotArgs, UploadArgs, WireMessage,
-        PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_COMMAND_REQUEST,
-        TYPE_ERROR, TYPE_HOST_AUTH_REQUEST, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO,
-        TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
+        COMMAND_DOWNLOAD_BEGIN, COMMAND_EXEC, COMMAND_KEYBOARD_KEY, COMMAND_KEYBOARD_TYPE,
+        COMMAND_MOUSE_CLICK, COMMAND_MOUSE_MOVE, COMMAND_MOUSE_SCROLL, COMMAND_SCREENSHOT,
+        COMMAND_UPLOAD_BEGIN, COMMAND_WINDOWS, PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE,
+        TYPE_COMMAND_OUTPUT, TYPE_COMMAND_REQUEST, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR,
+        TYPE_HOST_AUTH_REQUEST, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_SESSION_CLOSED,
+        TYPE_HOST_SESSION_OPENED, TYPE_UPLOAD_COMPLETE,
     },
     totp,
     transfer::{chunk_binary, sha256_bytes, write_all_new, BinaryFrame, BinaryKind},
@@ -87,6 +90,31 @@ async fn main() -> Result<()> {
     update_clipboard(&context);
     tokio::spawn(totp_refresher(context.clone()));
 
+    loop {
+        tokio::select! {
+            result = run_host_connection(context.clone(), ws_url.clone()) => {
+                match result {
+                    Ok(()) => println!("Connection: disconnected; reconnecting"),
+                    Err(err) => {
+                        warn!("host connection failed: {err}");
+                        println!("Connection: reconnecting ({err})");
+                    }
+                }
+                append_host_audit(&context, "host.reconnecting", None, None, None, Some("retry"));
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Connection: stopping");
+                break;
+            }
+        }
+    }
+
+    drop(power);
+    Ok(())
+}
+
+async fn run_host_connection(context: Arc<HostContext>, ws_url: String) -> Result<()> {
     let (ws, _) = connect_async(ws_url)
         .await
         .context("failed to connect to rcw-server host websocket")?;
@@ -160,7 +188,6 @@ async fn main() -> Result<()> {
         None,
         Some("ok"),
     );
-    drop(power);
     Ok(())
 }
 
@@ -240,7 +267,7 @@ async fn handle_server_message(
         }
         TYPE_COMMAND_REQUEST => {
             let payload: CommandRequestPayload = message.payload_as()?;
-            if payload.command == "upload" {
+            if payload.command == COMMAND_UPLOAD_BEGIN {
                 if let Err(err) = begin_upload(context, uploads, message.clone(), payload) {
                     send_error(
                         sink,
@@ -291,25 +318,29 @@ async fn execute_command(
     );
 
     let result = match payload.command.as_str() {
-        "exec" => command_exec(context, sink, &request_id, session_id.clone(), payload.args).await,
-        "download" => command_download(sink, &request_id, session_id.clone(), payload.args).await,
-        "screenshot" => {
+        COMMAND_EXEC => {
+            command_exec(context, sink, &request_id, session_id.clone(), payload.args).await
+        }
+        COMMAND_DOWNLOAD_BEGIN => {
+            command_download(sink, &request_id, session_id.clone(), payload.args).await
+        }
+        COMMAND_SCREENSHOT => {
             command_screenshot(sink, &request_id, session_id.clone(), payload.args).await
         }
-        "windows" => command_windows(sink, &request_id, session_id.clone()).await,
-        "mouse.move" => {
+        COMMAND_WINDOWS => command_windows(sink, &request_id, session_id.clone()).await,
+        COMMAND_MOUSE_MOVE => {
             command_mouse_move(sink, &request_id, session_id.clone(), payload.args).await
         }
-        "mouse.click" => {
+        COMMAND_MOUSE_CLICK => {
             command_mouse_click(sink, &request_id, session_id.clone(), payload.args).await
         }
-        "mouse.scroll" => {
+        COMMAND_MOUSE_SCROLL => {
             command_mouse_scroll(sink, &request_id, session_id.clone(), payload.args).await
         }
-        "keyboard.type" => {
+        COMMAND_KEYBOARD_TYPE => {
             command_keyboard_type(sink, &request_id, session_id.clone(), payload.args).await
         }
-        "keyboard.key" => {
+        COMMAND_KEYBOARD_KEY => {
             command_keyboard_key(sink, &request_id, session_id.clone(), payload.args).await
         }
         _ => {
@@ -418,8 +449,9 @@ async fn command_exec(
         send_output(sink, request_id, session_id.clone(), &stream, &data).await?;
     }
 
-    send_complete(
+    send_complete_kind(
         sink,
+        TYPE_DOWNLOAD_COMPLETE,
         request_id,
         session_id,
         CommandCompletePayload {
@@ -747,8 +779,9 @@ async fn finalize_upload(
         return Err(anyhow!("upload checksum mismatch"));
     }
     write_all_new(&state.args.remote_path, &bytes, state.args.overwrite)?;
-    send_complete(
+    send_complete_kind(
         sink,
+        TYPE_UPLOAD_COMPLETE,
         request_id,
         state.session_id.clone(),
         CommandCompletePayload {
@@ -766,7 +799,7 @@ async fn finalize_upload(
         "command.complete",
         Some(request_id.to_owned()),
         state.session_id,
-        Some("upload".to_owned()),
+        Some(COMMAND_UPLOAD_BEGIN.to_owned()),
         Some("ok"),
     );
     Ok(())
@@ -832,14 +865,19 @@ async fn send_complete(
     session_id: Option<String>,
     payload: CommandCompletePayload,
 ) -> Result<()> {
+    send_complete_kind(sink, TYPE_COMMAND_COMPLETE, request_id, session_id, payload).await
+}
+
+async fn send_complete_kind(
+    sink: &mut WsSink,
+    kind: &str,
+    request_id: &str,
+    session_id: Option<String>,
+    payload: CommandCompletePayload,
+) -> Result<()> {
     send_json(
         sink,
-        WireMessage::new(
-            TYPE_COMMAND_COMPLETE,
-            Some(request_id.to_owned()),
-            session_id,
-            payload,
-        )?,
+        WireMessage::new(kind, Some(request_id.to_owned()), session_id, payload)?,
     )
     .await
 }

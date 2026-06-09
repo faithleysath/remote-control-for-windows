@@ -17,9 +17,12 @@ use rcw_common::{
         ControlOpenResultPayload, DownloadArgs, ErrorPayload, ExecArgs, KeyboardKeyArgs,
         KeyboardTypeArgs, MouseClickArgs, MouseMoveArgs, MouseScrollArgs, ScreenshotArgs,
         SessionClosePayload, SessionCloseResultPayload, SessionStatusPayload,
-        SessionStatusResultPayload, UploadArgs, WindowInfo, WireMessage, PROTOCOL_VERSION,
-        TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN,
-        TYPE_ERROR, TYPE_SESSION_CLOSE, TYPE_SESSION_STATUS,
+        SessionStatusResultPayload, UploadArgs, WindowInfo, WireMessage, COMMAND_DOWNLOAD_BEGIN,
+        COMMAND_EXEC, COMMAND_KEYBOARD_KEY, COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK,
+        COMMAND_MOUSE_MOVE, COMMAND_MOUSE_SCROLL, COMMAND_SCREENSHOT, COMMAND_UPLOAD_BEGIN,
+        COMMAND_WINDOWS, PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT,
+        TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR,
+        TYPE_SESSION_CLOSE, TYPE_SESSION_STATUS, TYPE_UPLOAD_COMPLETE,
     },
     transfer::{chunk_binary, sha256_bytes, sha256_file, BinaryFrame, BinaryKind},
 };
@@ -194,7 +197,7 @@ async fn run() -> Result<i32> {
             simple_command(
                 &cli,
                 &request_id,
-                "mouse.move",
+                COMMAND_MOUSE_MOVE,
                 json!(MouseMoveArgs { x: *x, y: *y }),
             )
             .await
@@ -203,7 +206,7 @@ async fn run() -> Result<i32> {
             simple_command(
                 &cli,
                 &request_id,
-                "mouse.click",
+                COMMAND_MOUSE_CLICK,
                 json!(MouseClickArgs {
                     x: *x,
                     y: *y,
@@ -216,7 +219,7 @@ async fn run() -> Result<i32> {
             simple_command(
                 &cli,
                 &request_id,
-                "mouse.scroll",
+                COMMAND_MOUSE_SCROLL,
                 json!(MouseScrollArgs { delta: *delta }),
             )
             .await
@@ -225,7 +228,7 @@ async fn run() -> Result<i32> {
             simple_command(
                 &cli,
                 &request_id,
-                "keyboard.type",
+                COMMAND_KEYBOARD_TYPE,
                 json!(KeyboardTypeArgs { text: text.clone() }),
             )
             .await
@@ -234,7 +237,7 @@ async fn run() -> Result<i32> {
             simple_command(
                 &cli,
                 &request_id,
-                "keyboard.key",
+                COMMAND_KEYBOARD_KEY,
                 json!(KeyboardKeyArgs { key: key.clone() }),
             )
             .await
@@ -398,7 +401,7 @@ async fn exec_command(cli: &Cli, request_id: &str, command: &[String]) -> Result
     let response = send_command_with_frames(
         cli,
         request_id,
-        "exec",
+        COMMAND_EXEC,
         json!(ExecArgs {
             program: command[0].clone(),
             argv: command[1..].to_vec(),
@@ -444,10 +447,10 @@ async fn upload_file(
             bail!("local sha256 mismatch: expected {expected}, calculated {actual}");
         }
     }
-    let response = send_command_with_frames(
+    let response = send_command_with_frames_and_terminal(
         cli,
         request_id,
-        "upload",
+        COMMAND_UPLOAD_BEGIN,
         json!(UploadArgs {
             remote_path: remote.to_owned(),
             overwrite,
@@ -455,6 +458,7 @@ async fn upload_file(
             size: bytes.len() as u64,
         }),
         chunk_binary(request_id, BinaryKind::UploadChunk, &bytes)?,
+        &[TYPE_UPLOAD_COMPLETE],
         wait_timeout(cli)?,
     )
     .await?;
@@ -477,13 +481,14 @@ async fn upload_file(
 }
 
 async fn download_file(cli: &Cli, request_id: &str, remote: &str, local: &Path) -> Result<i32> {
-    let response = send_command(
+    let response = send_command_with_terminal(
         cli,
         request_id,
-        "download",
+        COMMAND_DOWNLOAD_BEGIN,
         json!(DownloadArgs {
             remote_path: remote.to_owned()
         }),
+        &[TYPE_DOWNLOAD_COMPLETE],
         wait_timeout(cli)?,
     )
     .await?;
@@ -525,7 +530,7 @@ async fn screenshot(
     let response = send_command(
         cli,
         request_id,
-        "screenshot",
+        COMMAND_SCREENSHOT,
         json!(ScreenshotArgs {
             display,
             format: format.to_owned(),
@@ -558,7 +563,14 @@ async fn screenshot(
 }
 
 async fn windows(cli: &Cli, request_id: &str) -> Result<i32> {
-    let response = send_command(cli, request_id, "windows", json!({}), wait_timeout(cli)?).await?;
+    let response = send_command(
+        cli,
+        request_id,
+        COMMAND_WINDOWS,
+        json!({}),
+        wait_timeout(cli)?,
+    )
+    .await?;
     let complete = response.complete.context("missing command.complete")?;
     if cli.json {
         let windows: Value = serde_json::from_str(&response.json_stream)?;
@@ -603,7 +615,35 @@ async fn send_command(
     args: Value,
     wait: Duration,
 ) -> Result<CommandResponse> {
-    send_command_with_frames(cli, request_id, command, args, Vec::new(), wait).await
+    send_command_with_terminal(
+        cli,
+        request_id,
+        command,
+        args,
+        &[TYPE_COMMAND_COMPLETE],
+        wait,
+    )
+    .await
+}
+
+async fn send_command_with_terminal(
+    cli: &Cli,
+    request_id: &str,
+    command: &str,
+    args: Value,
+    terminal_kinds: &[&str],
+    wait: Duration,
+) -> Result<CommandResponse> {
+    send_command_with_frames_and_terminal(
+        cli,
+        request_id,
+        command,
+        args,
+        Vec::new(),
+        terminal_kinds,
+        wait,
+    )
+    .await
 }
 
 async fn send_command_with_frames(
@@ -612,6 +652,27 @@ async fn send_command_with_frames(
     command: &str,
     args: Value,
     binary_frames: Vec<Vec<u8>>,
+    wait: Duration,
+) -> Result<CommandResponse> {
+    send_command_with_frames_and_terminal(
+        cli,
+        request_id,
+        command,
+        args,
+        binary_frames,
+        &[TYPE_COMMAND_COMPLETE],
+        wait,
+    )
+    .await
+}
+
+async fn send_command_with_frames_and_terminal(
+    cli: &Cli,
+    request_id: &str,
+    command: &str,
+    args: Value,
+    binary_frames: Vec<Vec<u8>>,
+    terminal_kinds: &[&str],
     wait: Duration,
 ) -> Result<CommandResponse> {
     let mut session = read_session(cli)?;
@@ -631,7 +692,7 @@ async fn send_command_with_frames(
         &session.server,
         message,
         binary_frames,
-        &[TYPE_COMMAND_COMPLETE],
+        terminal_kinds,
         wait,
     )
     .await?;
@@ -726,7 +787,7 @@ fn command_response(messages: Vec<IncomingFrame>) -> Result<CommandResponse> {
                         _ => {}
                     }
                 }
-                TYPE_COMMAND_COMPLETE => {
+                TYPE_COMMAND_COMPLETE | TYPE_UPLOAD_COMPLETE | TYPE_DOWNLOAD_COMPLETE => {
                     response.complete = Some(message.payload_as()?);
                 }
                 _ => {}

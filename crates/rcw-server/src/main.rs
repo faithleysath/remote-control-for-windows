@@ -27,10 +27,11 @@ use rcw_common::{
         HostSessionClosedPayload, HostSessionOpenedPayload, SessionClosePayload,
         SessionCloseResultPayload, SessionStatusPayload, SessionStatusResultPayload, WireMessage,
         PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_COMMAND_REQUEST,
-        TYPE_CONTROL_OPEN, TYPE_CONTROL_OPEN_RESULT, TYPE_ERROR, TYPE_HOST_AUTH_REQUEST,
-        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED,
-        TYPE_HOST_SESSION_OPENED, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT,
-        TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
+        TYPE_CONTROL_OPEN, TYPE_CONTROL_OPEN_RESULT, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR,
+        TYPE_HOST_AUTH_REQUEST, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_HELLO_ACK,
+        TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED, TYPE_SESSION_CLOSE,
+        TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
+        TYPE_UPLOAD_COMPLETE,
     },
     transfer::BinaryFrame,
 };
@@ -314,9 +315,11 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
 async fn handle_host_message(state: &AppState, machine_id: &str, message: WireMessage) {
     match message.kind.as_str() {
         TYPE_HOST_AUTH_RESULT => handle_host_auth_result(state, machine_id, message).await,
-        TYPE_COMMAND_OUTPUT | TYPE_COMMAND_COMPLETE | TYPE_ERROR => {
-            relay_host_response(state, machine_id, message).await
-        }
+        TYPE_COMMAND_OUTPUT
+        | TYPE_COMMAND_COMPLETE
+        | TYPE_UPLOAD_COMPLETE
+        | TYPE_DOWNLOAD_COMPLETE
+        | TYPE_ERROR => relay_host_response(state, machine_id, message).await,
         other => debug!("ignored host message type {other} from {machine_id}"),
     }
 }
@@ -435,7 +438,10 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
 
 async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMessage) {
     let request_id = message.request_id.clone();
-    let is_terminal = matches!(message.kind.as_str(), TYPE_COMMAND_COMPLETE | TYPE_ERROR);
+    let is_terminal = matches!(
+        message.kind.as_str(),
+        TYPE_COMMAND_COMPLETE | TYPE_UPLOAD_COMPLETE | TYPE_DOWNLOAD_COMPLETE | TYPE_ERROR
+    );
     let Some(session_id) = message.session_id.clone() else {
         warn!("host response without session_id from {machine_id}");
         return;

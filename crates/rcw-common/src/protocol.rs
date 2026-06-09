@@ -20,7 +20,20 @@ pub const TYPE_SESSION_CLOSE_RESULT: &str = "session.close_result";
 pub const TYPE_COMMAND_REQUEST: &str = "command.request";
 pub const TYPE_COMMAND_OUTPUT: &str = "command.output";
 pub const TYPE_COMMAND_COMPLETE: &str = "command.complete";
+pub const TYPE_UPLOAD_COMPLETE: &str = "upload.complete";
+pub const TYPE_DOWNLOAD_COMPLETE: &str = "download.complete";
 pub const TYPE_ERROR: &str = "error";
+
+pub const COMMAND_EXEC: &str = "exec";
+pub const COMMAND_UPLOAD_BEGIN: &str = "upload.begin";
+pub const COMMAND_DOWNLOAD_BEGIN: &str = "download.begin";
+pub const COMMAND_SCREENSHOT: &str = "screenshot";
+pub const COMMAND_WINDOWS: &str = "windows";
+pub const COMMAND_MOUSE_MOVE: &str = "mouse.move";
+pub const COMMAND_MOUSE_CLICK: &str = "mouse.click";
+pub const COMMAND_MOUSE_SCROLL: &str = "mouse.scroll";
+pub const COMMAND_KEYBOARD_TYPE: &str = "keyboard.type";
+pub const COMMAND_KEYBOARD_KEY: &str = "keyboard.key";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
