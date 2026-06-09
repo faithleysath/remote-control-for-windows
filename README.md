@@ -84,8 +84,8 @@ rcwctl close
 当前仓库已经创建 Rust workspace 和 v1 主链路实现：
 
 - `rcw-common`：协议、配置、ID/session token、TOTP、审计 JSONL 和 SHA-256 工具。
-- `rcw-server`：`/healthz`、`/ws/host`、`/ws/control`、控制端 token 校验、TOTP 转发认证、内存 session、status/close 和命令中继。
-- `rcw-host`：被控端连接、机器 ID/TOTP 显示、剪贴板刷新、会话认证、命令执行、文件上传下载、审计日志和 Windows 平台操作入口。
+- `rcw-server`：`/healthz`、`/ws/host`、`/ws/control`、控制端 token 校验、TOTP 转发认证、内存 session、status/close、命令和 binary frame 中继、WebSocket ping 心跳、基础限流。
+- `rcw-host`：被控端连接、机器 ID/TOTP 显示、剪贴板刷新、会话认证、流式命令输出、分块文件上传下载、截图 binary chunk 返回、审计日志和 Windows 平台操作入口。
 - `rcwctl`：`open/status/exec/upload/download/screenshot/windows/move/click/scroll/type/key/close`，会话文件复用、JSON 输出和控制端审计。
 
-已在 Linux 开发环境验证 `cargo check`、`cargo test`、`cargo clippy` 和本地 server + host + rcwctl 烟测。Windows E2E 和交叉编译尚未执行。
+`ba8baad` 提交时曾在 Linux 开发环境验证 `cargo check`、`cargo test`、`cargo clippy` 和本地 server + host + rcwctl 烟测。后续补齐 binary 分块、流式输出、心跳和限流代码后，按要求尚未执行验证、测试、Windows E2E 或交叉编译。

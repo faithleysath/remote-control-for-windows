@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use futures_util::{SinkExt, StreamExt};
@@ -22,7 +21,7 @@ use rcw_common::{
         TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN,
         TYPE_ERROR, TYPE_SESSION_CLOSE, TYPE_SESSION_STATUS,
     },
-    transfer::{sha256_bytes, sha256_file},
+    transfer::{chunk_binary, sha256_bytes, sha256_file, BinaryFrame, BinaryKind},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -133,6 +132,11 @@ struct CommandResponse {
     file: Vec<u8>,
     json_stream: String,
     complete: Option<CommandCompletePayload>,
+}
+
+enum IncomingFrame {
+    Text(WireMessage),
+    Binary(Vec<u8>),
 }
 
 #[tokio::main]
@@ -391,7 +395,7 @@ async fn exec_command(cli: &Cli, request_id: &str, command: &[String]) -> Result
     }
     let wait = wait_timeout(cli)?;
     let remote_timeout_ms = wait.as_millis().min(u64::MAX as u128) as u64;
-    let response = send_command(
+    let response = send_command_with_frames(
         cli,
         request_id,
         "exec",
@@ -440,7 +444,7 @@ async fn upload_file(
             bail!("local sha256 mismatch: expected {expected}, calculated {actual}");
         }
     }
-    let response = send_command(
+    let response = send_command_with_frames(
         cli,
         request_id,
         "upload",
@@ -448,8 +452,9 @@ async fn upload_file(
             remote_path: remote.to_owned(),
             overwrite,
             sha256: actual.clone(),
-            data_base64: BASE64_STANDARD.encode(&bytes),
+            size: bytes.len() as u64,
         }),
+        chunk_binary(request_id, BinaryKind::UploadChunk, &bytes)?,
         wait_timeout(cli)?,
     )
     .await?;
@@ -598,6 +603,17 @@ async fn send_command(
     args: Value,
     wait: Duration,
 ) -> Result<CommandResponse> {
+    send_command_with_frames(cli, request_id, command, args, Vec::new(), wait).await
+}
+
+async fn send_command_with_frames(
+    cli: &Cli,
+    request_id: &str,
+    command: &str,
+    args: Value,
+    binary_frames: Vec<Vec<u8>>,
+    wait: Duration,
+) -> Result<CommandResponse> {
     let mut session = read_session(cli)?;
     let payload = CommandRequestPayload {
         session_token: session.session_token.clone(),
@@ -611,8 +627,14 @@ async fn send_command(
         Some(session.session_id.clone()),
         payload,
     )?;
-    let messages =
-        send_and_collect(&session.server, message, &[TYPE_COMMAND_COMPLETE], wait).await?;
+    let messages = send_and_collect_with_binary(
+        &session.server,
+        message,
+        binary_frames,
+        &[TYPE_COMMAND_COMPLETE],
+        wait,
+    )
+    .await?;
     session.last_used_at = rcw_common::audit::now_rfc3339();
     write_session(cli, &session)?;
     command_response(messages)
@@ -623,19 +645,37 @@ async fn send_and_collect(
     message: WireMessage,
     terminal_kinds: &[&str],
     wait: Duration,
-) -> Result<Vec<WireMessage>> {
+) -> Result<Vec<IncomingFrame>> {
+    send_and_collect_with_binary(server, message, Vec::new(), terminal_kinds, wait).await
+}
+
+async fn send_and_collect_with_binary(
+    server: &str,
+    message: WireMessage,
+    binary_frames: Vec<Vec<u8>>,
+    terminal_kinds: &[&str],
+    wait: Duration,
+) -> Result<Vec<IncomingFrame>> {
     let (mut sink, mut stream) = connect_control(server).await?;
     send_json(&mut sink, message).await?;
+    for frame in binary_frames {
+        sink.send(Message::Binary(frame)).await?;
+    }
 
     let mut messages = Vec::new();
     loop {
-        let message = next_text_message(&mut stream, wait).await?;
-        if message.kind == TYPE_ERROR {
-            let error: ErrorPayload = message.payload_as()?;
-            bail!("{:?}: {}", error.code, error.message);
-        }
-        let terminal = terminal_kinds.iter().any(|kind| *kind == message.kind);
-        messages.push(message);
+        let frame = next_message(&mut stream, wait).await?;
+        let terminal = match &frame {
+            IncomingFrame::Text(message) => {
+                if message.kind == TYPE_ERROR {
+                    let error: ErrorPayload = message.payload_as()?;
+                    bail!("{:?}: {}", error.code, error.message);
+                }
+                terminal_kinds.iter().any(|kind| *kind == message.kind)
+            }
+            IncomingFrame::Binary(_) => false,
+        };
+        messages.push(frame);
         if terminal {
             return Ok(messages);
         }
@@ -656,54 +696,68 @@ async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
     Ok(())
 }
 
-async fn next_text_message(stream: &mut WsStream, wait: Duration) -> Result<WireMessage> {
+async fn next_message(stream: &mut WsStream, wait: Duration) -> Result<IncomingFrame> {
     loop {
         let frame = timeout(wait, stream.next())
             .await
             .context("timed out waiting for server response")?
             .ok_or_else(|| anyhow!("server closed control websocket"))??;
         match frame {
-            Message::Text(text) => return Ok(serde_json::from_str(&text)?),
+            Message::Text(text) => return Ok(IncomingFrame::Text(serde_json::from_str(&text)?)),
+            Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes)),
             Message::Close(_) => bail!("server closed control websocket"),
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+            Message::Ping(_) | Message::Pong(_) => {}
             Message::Frame(_) => {}
         }
     }
 }
 
-fn command_response(messages: Vec<WireMessage>) -> Result<CommandResponse> {
+fn command_response(messages: Vec<IncomingFrame>) -> Result<CommandResponse> {
     let mut response = CommandResponse::default();
-    for message in messages {
-        match message.kind.as_str() {
-            TYPE_COMMAND_OUTPUT => {
-                let output: CommandOutputPayload = message.payload_as()?;
-                match output.stream.as_str() {
-                    "stdout" => response.stdout.push_str(&output.data),
-                    "stderr" => response.stderr.push_str(&output.data),
-                    "file" => response
-                        .file
-                        .extend(BASE64_STANDARD.decode(output.data.as_bytes())?),
-                    "json" => response.json_stream.push_str(&output.data),
-                    _ => {}
+    for frame in messages {
+        match frame {
+            IncomingFrame::Text(message) => match message.kind.as_str() {
+                TYPE_COMMAND_OUTPUT => {
+                    let output: CommandOutputPayload = message.payload_as()?;
+                    match output.stream.as_str() {
+                        "stdout" => response.stdout.push_str(&output.data),
+                        "stderr" => response.stderr.push_str(&output.data),
+                        "json" => response.json_stream.push_str(&output.data),
+                        _ => {}
+                    }
+                }
+                TYPE_COMMAND_COMPLETE => {
+                    response.complete = Some(message.payload_as()?);
+                }
+                _ => {}
+            },
+            IncomingFrame::Binary(bytes) => {
+                let frame = BinaryFrame::decode(&bytes)?;
+                match frame.kind {
+                    BinaryKind::DownloadChunk | BinaryKind::ScreenshotChunk => {
+                        response.file.extend_from_slice(&frame.payload);
+                    }
+                    BinaryKind::UploadChunk => {}
                 }
             }
-            TYPE_COMMAND_COMPLETE => {
-                response.complete = Some(message.payload_as()?);
-            }
-            _ => {}
         }
     }
     Ok(response)
 }
 
-fn last_payload<T>(messages: &[WireMessage]) -> Result<T>
+fn last_payload<T>(messages: &[IncomingFrame]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
 {
-    Ok(messages
-        .last()
-        .ok_or_else(|| anyhow!("missing response message"))?
-        .payload_as()?)
+    let message = messages
+        .iter()
+        .rev()
+        .find_map(|frame| match frame {
+            IncomingFrame::Text(message) => Some(message),
+            IncomingFrame::Binary(_) => None,
+        })
+        .ok_or_else(|| anyhow!("missing response message"))?;
+    Ok(message.payload_as()?)
 }
 
 fn session_path(cli: &Cli) -> Result<PathBuf> {

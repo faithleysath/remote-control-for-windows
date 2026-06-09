@@ -1,4 +1,10 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -26,6 +32,7 @@ use rcw_common::{
         TYPE_HOST_SESSION_OPENED, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT,
         TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
     },
+    transfer::BinaryFrame,
 };
 use serde_json::json;
 use tokio::{
@@ -36,7 +43,12 @@ use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 
-type Tx = mpsc::UnboundedSender<WireMessage>;
+type Tx = mpsc::UnboundedSender<Outbound>;
+
+enum Outbound {
+    Text(WireMessage),
+    Binary(Vec<u8>),
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -49,6 +61,9 @@ struct ServerState {
     hosts: Mutex<HashMap<String, HostConn>>,
     sessions: Mutex<HashMap<String, SessionState>>,
     pending_open: Mutex<HashMap<String, PendingOpen>>,
+    request_routes: Mutex<HashMap<String, String>>,
+    host_registrations: Mutex<HashMap<String, VecDeque<Instant>>>,
+    auth_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
 #[derive(Clone)]
@@ -93,6 +108,9 @@ async fn main() -> Result<()> {
             hosts: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             pending_open: Mutex::new(HashMap::new()),
+            request_routes: Mutex::new(HashMap::new()),
+            host_registrations: Mutex::new(HashMap::new()),
+            auth_attempts: Mutex::new(HashMap::new()),
         }),
         control_token: Arc::new(control_token),
         audit_path: Arc::new(audit_path),
@@ -178,16 +196,58 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<WireMessage>();
+    if !allow_rate_limit(
+        &state.inner.host_registrations,
+        &hello.machine_id,
+        20,
+        Duration::from_secs(60),
+    )
+    .await
+    {
+        let error = make_error(
+            hello_msg.request_id.clone(),
+            None,
+            ErrorCode::PermissionDenied,
+            "host registration rate limit exceeded",
+        );
+        let _ = sender
+            .send(Message::Text(
+                serde_json::to_string(&error).unwrap_or_default(),
+            ))
+            .await;
+        return;
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
     let writer = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            match serde_json::to_string(&message) {
-                Ok(text) => {
-                    if sender.send(Message::Text(text)).await.is_err() {
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+        loop {
+            tokio::select! {
+            maybe = rx.recv() => {
+                let Some(message) = maybe else {
+                    break;
+                };
+                match message {
+                    Outbound::Text(message) => match serde_json::to_string(&message) {
+                        Ok(text) => {
+                            if sender.send(Message::Text(text)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => warn!("failed to serialize outbound host message: {err}"),
+                    },
+                    Outbound::Binary(bytes) => {
+                        if sender.send(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ = heartbeat.tick() => {
+                if sender.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
                 }
-                Err(err) => warn!("failed to serialize outbound host message: {err}"),
             }
         }
     });
@@ -225,7 +285,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         },
     )
     .expect("host hello ack serializes");
-    let _ = tx.send(ack);
+    send_text(&tx, ack);
 
     info!("host {} connected", hello.machine_id);
 
@@ -235,8 +295,11 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
                 Ok(message) => handle_host_message(&state, &hello.machine_id, message).await,
                 Err(err) => warn!("invalid host message from {}: {err}", hello.machine_id),
             },
+            Ok(Message::Binary(bytes)) => {
+                relay_host_binary_response(&state, &hello.machine_id, bytes).await;
+            }
             Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
             Err(err) => {
                 warn!("host websocket error for {}: {err}", hello.machine_id);
                 break;
@@ -342,7 +405,7 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
         },
     )
     .expect("open result serializes");
-    let _ = pending.controller_tx.send(result);
+    send_text(&pending.controller_tx, result);
 
     if let Some(host_tx) = host_tx(state, machine_id).await {
         let opened = WireMessage::new(
@@ -355,7 +418,7 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
             },
         )
         .expect("session opened serializes");
-        let _ = host_tx.send(opened);
+        send_text(&host_tx, opened);
     }
 
     audit(
@@ -371,6 +434,8 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
 }
 
 async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let is_terminal = matches!(message.kind.as_str(), TYPE_COMMAND_COMPLETE | TYPE_ERROR);
     let Some(session_id) = message.session_id.clone() else {
         warn!("host response without session_id from {machine_id}");
         return;
@@ -383,22 +448,79 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
             .and_then(|session| session.controller_tx.clone())
     };
     if let Some(tx) = controller_tx {
-        let _ = tx.send(message);
+        send_text(&tx, message);
+    }
+    if is_terminal {
+        if let Some(request_id) = request_id {
+            let mut routes = state.inner.request_routes.lock().await;
+            routes.remove(&request_id);
+        }
+    }
+}
+
+async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: Vec<u8>) {
+    let frame = match BinaryFrame::decode(&bytes) {
+        Ok(frame) => frame,
+        Err(err) => {
+            warn!("invalid binary frame from host {machine_id}: {err}");
+            return;
+        }
+    };
+    let session_id = {
+        let routes = state.inner.request_routes.lock().await;
+        routes.get(&frame.request_id).cloned()
+    };
+    let Some(session_id) = session_id else {
+        warn!(
+            "host binary frame for unknown request {} from {}",
+            frame.request_id, machine_id
+        );
+        return;
+    };
+    let controller_tx = {
+        let sessions = state.inner.sessions.lock().await;
+        sessions
+            .get(&session_id)
+            .filter(|session| session.machine_id == machine_id)
+            .and_then(|session| session.controller_tx.clone())
+    };
+    if let Some(tx) = controller_tx {
+        send_binary(&tx, bytes);
     }
 }
 
 async fn handle_control_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<WireMessage>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
     let writer = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            match serde_json::to_string(&message) {
-                Ok(text) => {
-                    if sender.send(Message::Text(text)).await.is_err() {
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+        loop {
+            tokio::select! {
+            maybe = rx.recv() => {
+                let Some(message) = maybe else {
+                    break;
+                };
+                match message {
+                    Outbound::Text(message) => match serde_json::to_string(&message) {
+                        Ok(text) => {
+                            if sender.send(Message::Text(text)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(err) => warn!("failed to serialize outbound control message: {err}"),
+                    },
+                    Outbound::Binary(bytes) => {
+                        if sender.send(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ = heartbeat.tick() => {
+                if sender.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
                 }
-                Err(err) => warn!("failed to serialize outbound control message: {err}"),
             }
         }
     });
@@ -415,8 +537,9 @@ async fn handle_control_socket(socket: WebSocket, state: AppState) {
                     &format!("invalid json frame: {err}"),
                 ),
             },
+            Ok(Message::Binary(bytes)) => handle_control_binary(&state, &tx, bytes).await,
             Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
             Err(err) => {
                 warn!("control websocket error: {err}");
                 break;
@@ -443,6 +566,62 @@ async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage)
     }
 }
 
+async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
+    let frame = match BinaryFrame::decode(&bytes) {
+        Ok(frame) => frame,
+        Err(err) => {
+            send_error(
+                tx,
+                None,
+                None,
+                ErrorCode::InternalError,
+                &format!("invalid binary frame: {err}"),
+            );
+            return;
+        }
+    };
+    let request_id = frame.request_id.clone();
+    let session_id = {
+        let routes = state.inner.request_routes.lock().await;
+        routes.get(&request_id).cloned()
+    };
+    let Some(session_id) = session_id else {
+        send_error(
+            tx,
+            Some(request_id),
+            None,
+            ErrorCode::SessionExpired,
+            "binary frame has no active request route",
+        );
+        return;
+    };
+    let (machine_id, session_id) = {
+        let sessions = state.inner.sessions.lock().await;
+        let Some(session) = sessions.get(&session_id) else {
+            send_error(
+                tx,
+                Some(request_id),
+                Some(session_id),
+                ErrorCode::SessionExpired,
+                ErrorCode::SessionExpired.message(),
+            );
+            return;
+        };
+        (session.machine_id.clone(), session.session_id.clone())
+    };
+    let Some(host_tx) = host_tx(state, &machine_id).await else {
+        send_error(
+            tx,
+            Some(request_id),
+            Some(session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+    send_binary(&host_tx, bytes);
+}
+
 async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
     let request_id = message.request_id.clone();
     let open = match message.payload_as::<ControlOpenPayload>() {
@@ -466,6 +645,23 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
             None,
             ErrorCode::InternalError,
             "unsupported protocol version",
+        );
+        return;
+    }
+    if !allow_rate_limit(
+        &state.inner.auth_attempts,
+        &open.machine_id,
+        12,
+        Duration::from_secs(60),
+    )
+    .await
+    {
+        send_error(
+            tx,
+            request_id,
+            None,
+            ErrorCode::PermissionDenied,
+            "authentication rate limit exceeded",
         );
         return;
     }
@@ -561,7 +757,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
     )
     .expect("auth request serializes");
 
-    if host.tx.send(auth).is_err() {
+    if host.tx.send(Outbound::Text(auth)).is_err() {
         let mut pending = state.inner.pending_open.lock().await;
         pending.remove(&request_id);
         send_error(
@@ -631,7 +827,7 @@ async fn handle_session_status(state: &AppState, tx: &Tx, message: WireMessage) 
         },
     )
     .expect("status result serializes");
-    let _ = tx.send(result);
+    send_text(tx, result);
 }
 
 async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
@@ -692,7 +888,7 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
             },
         )
         .expect("session closed serializes");
-        let _ = host_tx.send(closed);
+        send_text(&host_tx, closed);
     }
 
     let response = WireMessage::new(
@@ -705,7 +901,7 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
         },
     )
     .expect("close result serializes");
-    let _ = tx.send(response);
+    send_text(tx, response);
 
     audit(
         state,
@@ -721,6 +917,16 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
 
 async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMessage) {
     let request_id = message.request_id.clone();
+    let Some(request_id_value) = request_id.clone() else {
+        send_error(
+            tx,
+            None,
+            message.session_id.clone(),
+            ErrorCode::InternalError,
+            "command.request requires request_id",
+        );
+        return;
+    };
     let Some(session_id) = message.session_id.clone() else {
         send_error(
             tx,
@@ -780,7 +986,13 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
     };
 
     message.session_id = Some(session.session_id.clone());
-    if host_tx.send(message).is_err() {
+    {
+        let mut routes = state.inner.request_routes.lock().await;
+        routes.insert(request_id_value.clone(), session.session_id.clone());
+    }
+    if host_tx.send(Outbound::Text(message)).is_err() {
+        let mut routes = state.inner.request_routes.lock().await;
+        routes.remove(&request_id_value);
         send_error(
             tx,
             request_id,
@@ -876,7 +1088,7 @@ fn send_error(
     code: ErrorCode,
     message: &str,
 ) {
-    let _ = tx.send(make_error(request_id, session_id, code, message));
+    send_text(tx, make_error(request_id, session_id, code, message));
 }
 
 fn make_error(
@@ -901,4 +1113,35 @@ fn audit(state: &AppState, event: AuditEvent) {
     if let Err(err) = append_jsonl(state.audit_path.as_ref(), &event) {
         error!("failed to write server audit log: {err}");
     }
+}
+
+fn send_text(tx: &Tx, message: WireMessage) {
+    let _ = tx.send(Outbound::Text(message));
+}
+
+fn send_binary(tx: &Tx, bytes: Vec<u8>) {
+    let _ = tx.send(Outbound::Binary(bytes));
+}
+
+async fn allow_rate_limit(
+    table: &Mutex<HashMap<String, VecDeque<Instant>>>,
+    key: &str,
+    max_events: usize,
+    window: Duration,
+) -> bool {
+    let now = Instant::now();
+    let mut table = table.lock().await;
+    let events = table.entry(key.to_owned()).or_default();
+    while events
+        .front()
+        .map(|instant| now.duration_since(*instant) > window)
+        .unwrap_or(false)
+    {
+        events.pop_front();
+    }
+    if events.len() >= max_events {
+        return false;
+    }
+    events.push_back(now);
+    true
 }

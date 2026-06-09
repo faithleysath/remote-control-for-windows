@@ -208,7 +208,7 @@ pub struct UploadArgs {
     pub remote_path: String,
     pub overwrite: bool,
     pub sha256: String,
-    pub data_base64: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

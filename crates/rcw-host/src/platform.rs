@@ -346,6 +346,30 @@ pub fn keyboard_key(key: &str) -> Result<()> {
     }
 }
 
+pub fn kill_process_tree(pid: u32) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill.exe")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("taskkill failed for pid {pid}"));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("kill failed for pid {pid}"));
+        }
+        Ok(())
+    }
+}
+
 pub async fn sleep_until_next_totp_tick(period_seconds: u64) {
     let now = unix_now();
     let next = ((now / period_seconds) + 1) * period_seconds;
