@@ -2,7 +2,7 @@
 
 ## 传输
 
-The current protocol uses WebSocket connections with JSON control messages.
+当前协议使用 WebSocket 连接承载 JSON 控制消息。
 
 端点：
 
@@ -240,7 +240,7 @@ The current protocol uses WebSocket connections with JSON control messages.
 
 ## 命令类型
 
-Current command types:
+当前命令类型：
 
 - `session.status`：查询会话和主机在线状态。
 - `session.close`：关闭会话。
@@ -257,7 +257,7 @@ Current command types:
 
 ## 错误码
 
-Current error codes:
+当前错误码：
 
 - `invalid_token`
 - `host_not_found`
@@ -276,7 +276,4 @@ Current error codes:
 
 ## 版本兼容
 
-All hello/open messages include `protocol_version`. The current implementation
-accepts protocol version `1`. Future protocol extensions must preserve existing
-field meanings; new behavior should be negotiated through explicit capability
-fields or a deliberate protocol version bump.
+所有 hello/open 消息都带 `protocol_version`。当前实现接受协议版本 `1`。后续协议扩展必须保持既有字段含义不变；新行为应通过明确的 capability 字段协商，或有意识地提升协议版本。

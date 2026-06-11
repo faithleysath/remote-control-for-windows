@@ -238,8 +238,7 @@ DPI：
 
 建议 API/策略：
 
-- The current implementation can use `tokio::process::Command` with
-  Windows-specific cleanup where needed.
+- 当前实现可以使用 `tokio::process::Command`，并在需要时补充 Windows 专属清理逻辑。
 - 为 timeout 清理子进程树，建议 Windows Job Object：
   - `CreateJobObjectW`
   - `SetInformationJobObject`

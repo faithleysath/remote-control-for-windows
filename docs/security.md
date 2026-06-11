@@ -68,10 +68,7 @@
 
 如果被控端检测到当前进程是管理员权限，必须使用醒目颜色高亮显示。该提示不是为了鼓励提权，而是为了让客户和研发明确当前远控动作会拥有更高系统权限。
 
-The current UX does not require the customer to confirm every individual
-command, because the controller is designed for efficient agent-assisted
-diagnostics. It still must not add hidden windows, background persistence, or
-other behavior that bypasses customer awareness.
+当前交互不要求客户逐项确认每条命令，因为控制端面向高效的 agent 辅助诊断。但它仍然不得增加隐藏窗口、后台持久化或其他绕过客户感知的行为。
 
 ## 权限边界
 
@@ -102,9 +99,7 @@ other behavior that bypasses customer awareness.
 
 ## 审计
 
-The current audit model uses structured logs on all three sides and does not
-introduce a central audit database. Every operation must be correlatable by
-request ID across host, controller, and server logs.
+当前审计模型使用三端结构化日志，不引入中央审计数据库。每个操作都必须能通过 request ID 在 host、controller 和 server 日志中对齐。
 
 三端职责：
 

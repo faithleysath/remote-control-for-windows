@@ -77,7 +77,7 @@ rcw-server
 
 ## 打包目标
 
-Current release artifacts:
+当前发布产物：
 
 - `rcw-host.exe`：Windows x64。
 - `rcwctl`：Linux x64、macOS、Windows x64。

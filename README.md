@@ -1,68 +1,51 @@
 # Remote Control for Windows
 
-Remote Control for Windows is a temporary, visible remote-assistance tool for
-Windows support sessions. It is designed for engineers and automation agents
-that need a command-line control surface for diagnostics, file transfer,
-screenshots, and basic GUI input on an explicitly authorized customer machine.
+`remote-control-for-windows` 是一套临时、可见、可审计的 Windows 远程协助工具。它面向授权支持场景，让研发、运维或 Codex agent 可以通过命令行完成诊断、文件传输、截图和基础 GUI 操作。
 
-The project is now in maintenance and iteration mode. The v1 remote-control
-chain is implemented and has been validated against a real Windows VM; future
-work should preserve the current safety model while hardening packaging,
-automation, and operator ergonomics.
+项目现在已经从 v1 的从零实现阶段进入长期维护和迭代阶段。v1 远控主链路已经实现，并在真实 Windows VM 中完成主要闭环验证；后续工作应在保持当前安全模型的前提下继续强化打包、自动化验证和操作体验。
 
-## Components
+## 组件
 
-- `rcw-server`: WebSocket relay server for hosts and controllers.
-- `rcw-host.exe`: visible Windows host process run by the customer or tester.
-- `rcwctl`: controller CLI used by engineers, scripts, or Codex agents.
-- `rcw-common`: shared protocol, IDs, TOTP, audit, config, and transfer code.
+- `rcw-server`：WebSocket 中继服务器，连接被控端和控制端。
+- `rcw-host.exe`：客户或测试人员在 Windows 上运行的可见被控端。
+- `rcwctl`：研发、脚本或 Codex agent 使用的控制端 CLI。
+- `rcw-common`：共享协议、ID、TOTP、审计、配置和传输逻辑。
 
 ```text
 rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 ```
 
-All connections are outbound from the host/controller side. The host registers
-without a control token; a controller must have both the server control token and
-the current host TOTP before a session can be opened.
+所有连接都由 host/control 侧主动发起。被控端上线不需要控制端 token；控制端必须同时持有服务端控制 token 和被控端当前 TOTP，才能打开会话。
 
-## Current Status
+## 当前状态
 
-Validated on 2026-06-11:
+2026-06-11 已验证：
 
-- Local Rust checks: `cargo fmt --check`, `cargo test --workspace`,
-  `cargo clippy --workspace -- -D warnings`.
-- Windows host cross-build from Linux with static CRT using `cargo-xwin`.
-- Windows VM E2E: session open/status/close, invalid token/TOTP handling,
-  command execution, command timeout cleanup, upload/download SHA-256 checks,
-  window enumeration, screenshot, mouse movement/click/scroll, keyboard text and
-  key input, clipboard safety, sleep/display suppression, expired session
-  behavior, and server/host audit logs.
+- 本地 Rust 检查：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`。
+- Linux 上通过 `cargo-xwin` 交叉构建静态 CRT 的 Windows 被控端。
+- Windows VM 实机 E2E：会话 `open/status/close`、错误 token/TOTP/TOTP 周期处理、命令执行、命令超时清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
 
-Known validation gap:
+仍需补齐的验证项：
 
-- A non-elevated standard-user interactive desktop run still needs final proof
-  that `rcw-host.exe` displays `Privilege: standard user`. Elevated
-  administrator desktop behavior has already been verified.
+- 在真实标准用户交互桌面中启动 `rcw-host.exe`，最终确认控制台显示 `Privilege: standard user`。管理员 elevated 桌面行为已经验证通过。
 
-## Safety Model
+## 安全模型
 
-This tool is intentionally not stealth software:
+这个工具明确不是静默远控工具：
 
-- The Windows host is a visible console process.
-- Closing the host window terminates control.
-- The host does not install a service, add startup entries, hide itself, or
-  persist after exit.
-- The host does not auto-elevate or bypass UAC.
-- The host console shows the current privilege state and operation summaries.
-- Clipboard connection info excludes control tokens, session tokens, TOTP seed,
-  and raw machine identifiers.
-- Operations are audit-logged on the host, controller, and server surfaces.
+- Windows 被控端是可见控制台进程。
+- 关闭被控端窗口即终止控制。
+- 被控端不安装服务、不写入启动项、不隐藏自身、不在退出后驻留。
+- 被控端不自动提权，也不绕过 UAC。
+- 被控端控制台显示当前权限状态和操作摘要。
+- 剪贴板连接信息不包含控制端 token、session token、TOTP seed 或原始机器标识。
+- host、controller、server 三端都记录审计日志。
 
-See [docs/security.md](docs/security.md) for the full security boundary.
+完整安全边界见 [docs/security.md](docs/security.md)。
 
-## Quick Start
+## 快速开始
 
-Run a local relay server:
+启动本地中继服务器：
 
 ```bash
 export RCW_BIND_ADDR=127.0.0.1:7800
@@ -70,13 +53,13 @@ export RCW_CONTROL_TOKEN='replace-with-a-random-token'
 cargo run -p rcw-server
 ```
 
-Run the Windows host:
+在 Windows 上启动被控端：
 
 ```powershell
 .\rcw-host.exe --server ws://<server-host>:7800
 ```
 
-Open a controller session and run commands:
+打开控制端会话并执行命令：
 
 ```bash
 export RCW_SERVER_URL=ws://127.0.0.1:7800
@@ -89,22 +72,22 @@ cargo run -p rcwctl -- screenshot --output screen.png
 cargo run -p rcwctl -- close
 ```
 
-Use `--json` for agent-friendly output:
+给 agent 使用时建议开启 JSON 输出：
 
 ```bash
 cargo run -p rcwctl -- --json exec -- pwsh -NoProfile -Command "hostname"
 ```
 
-## Build
+## 构建
 
-Local Linux builds:
+本地 Linux 构建：
 
 ```bash
 cargo build --workspace
 cargo test --workspace
 ```
 
-Cross-build the Windows host from Linux:
+从 Linux 交叉构建 Windows 被控端：
 
 ```bash
 rustup target add x86_64-pc-windows-msvc
@@ -112,18 +95,17 @@ RUSTFLAGS='-C target-feature=+crt-static' \
   cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
-Output:
+产物路径：
 
 ```text
 target/x86_64-pc-windows-msvc/release/rcw-host.exe
 ```
 
-The static CRT build avoids requiring VC++ runtime installation on a clean
-Windows machine.
+静态 CRT 构建可以避免干净 Windows 环境缺少 VC++ 运行库。
 
-## Development Checks
+## 开发检查
 
-Run these before submitting changes:
+提交变更前至少运行：
 
 ```bash
 cargo fmt --check
@@ -131,7 +113,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-For host-side Windows changes, also run:
+如果改动涉及 Windows host 侧代码，还应运行：
 
 ```bash
 RUSTFLAGS='-C target-feature=+crt-static' \
@@ -140,25 +122,26 @@ RUSTFLAGS='-C target-feature=+crt-static' \
   cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
-## Documentation
+## 文档
 
-- [Documentation index](docs/README.md)
-- [Project scope](docs/project-scope.md)
-- [Architecture](docs/architecture.md)
-- [Protocol](docs/protocol.md)
-- [CLI reference](docs/cli.md)
-- [Configuration](docs/configuration.md)
-- [Testing](docs/testing.md)
-- [Release process](docs/release.md)
-- [Roadmap](docs/roadmap.md)
-- [Security model](docs/security.md)
-- [Windows implementation notes](docs/windows-apis.md)
+根目录 `README.md` 是项目首页，面向第一次进入仓库的人；`docs/README.md` 是文档目录索引，面向需要深入查阅设计、测试、发布和维护资料的人。两者不是重复正文，职责不同。
 
-## Contributing
+- [文档索引](docs/README.md)
+- [项目范围](docs/project-scope.md)
+- [技术架构](docs/architecture.md)
+- [协议设计](docs/protocol.md)
+- [CLI 参考](docs/cli.md)
+- [配置说明](docs/configuration.md)
+- [测试与验证](docs/testing.md)
+- [发布流程](docs/release.md)
+- [路线图](docs/roadmap.md)
+- [安全模型](docs/security.md)
+- [Windows 实现说明](docs/windows-apis.md)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security-sensitive changes must preserve
-customer visibility, explicit authorization, token redaction, and auditability.
+## 贡献
 
-## License
+见 [CONTRIBUTING.md](CONTRIBUTING.md)。涉及安全边界的改动必须保持客户可见、显式授权、token 脱敏和操作可审计。
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+## 许可证
+
+本项目使用 MIT 许可证。见 [LICENSE](LICENSE)。

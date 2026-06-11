@@ -1,52 +1,39 @@
-# Testing
+# 测试与验证
 
-This document is the maintainer-facing verification plan. It replaces the early
-E2E planning document now that v1 has a working implementation and a Windows VM
-validation baseline.
+本文档面向维护者，记录验证计划和当前实机验证基线。它取代早期 E2E 规划文档，因为 v1 已经有可运行实现和 Windows VM 验证记录。
 
-## Current Validation Record
+## 当前验证记录
 
-On 2026-06-11, v1 was tested against the local `/data/windows-vm`
-Windows-in-Docker VM. `rcw-host.exe` was cross-built on Linux and copied into
-the Windows VM; `rcw-server` and `rcwctl` ran on the Linux host.
+2026-06-11，v1 在本机 `/data/windows-vm` Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。
 
-Verified:
+已验证：
 
-- Host startup, server connection, machine ID/TOTP display, clipboard update,
-  and elevated administrator privilege display.
-- `rcwctl open/status/close`.
-- Invalid control token, invalid TOTP, and mismatched TOTP period errors.
-- Remote Windows command execution.
-- Command timeout returning `RequestTimeout` with no residual tested `pwsh`
-  process.
-- Upload/download SHA-256 equality.
-- Visible window enumeration.
-- Interactive-desktop screenshot producing a 1280x720 PNG.
-- Mouse move/click/scroll and keyboard type/key behavior, verified through
-  Notepad screenshots.
-- Clipboard content containing only server, machine ID, code, and period, with
-  no control token, session token, TOTP seed, or raw machine identifier.
-- `powercfg /requests` showing `rcw-host.exe` holding `DISPLAY` and `SYSTEM`
-  requests, with session still active after temporarily reducing AC display and
-  sleep timeouts.
-- Old restored session file returning `SessionExpired` after `rcwctl close`.
-- Server and host audit logs containing request-ID-linked events.
+- host 启动、连接 server、显示 machine ID/TOTP、更新剪贴板，并显示管理员 elevated 权限状态。
+- `rcwctl open/status/close`。
+- 错误控制端 token、错误 TOTP、TOTP 周期不一致均返回预期错误。
+- 远程 Windows 命令执行。
+- 命令超时返回 `RequestTimeout`，且被测 `pwsh` 进程无残留。
+- 上传/下载 SHA-256 一致。
+- 可见窗口枚举。
+- 交互桌面截图生成 1280x720 PNG。
+- 鼠标 move/click/scroll 和键盘 type/key 均执行成功，并通过 Notepad 截图确认。
+- 剪贴板内容只包含 server、machine ID、验证码和有效期，不包含 control token、session token、TOTP seed 或原始机器标识。
+- `powercfg /requests` 显示 `rcw-host.exe` 持有 `DISPLAY` 和 `SYSTEM` 请求；临时缩短 AC 显示/睡眠超时后，session 仍保持 active。
+- `rcwctl close` 后恢复旧 session 文件再请求状态，返回 `SessionExpired`。
+- server 和 host 审计日志包含可按 request ID 对齐的事件。
 
-Remaining validation gap:
+剩余验证缺口：
 
-- Start `rcw-host.exe` inside a real standard-user interactive desktop and
-  confirm the console displays `Privilege: standard user`. Automated attempts in
-  the current VM did not produce a stable observable standard-user desktop host
-  process; administrator interactive runs were validated.
+- 在真实标准用户交互桌面中启动 `rcw-host.exe`，确认控制台显示 `Privilege: standard user`。当前 VM 中的自动化尝试没有稳定产生可观察的标准用户桌面 host 进程；管理员交互桌面运行已经验证。
 
-Evidence from the 2026-06-11 run was preserved under:
+2026-06-11 的证据保留位置：
 
-- Linux side: `/tmp/rcw-v1-full.Qm94Dp`
-- Windows shared logs: `/data/windows-vm/shared/rcw-v1-*`
+- Linux 侧：`/tmp/rcw-v1-full.Qm94Dp`
+- Windows 共享目录日志：`/data/windows-vm/shared/rcw-v1-*`
 
-## Required Local Checks
+## 必跑本地检查
 
-Run before code changes are submitted:
+代码变更提交前运行：
 
 ```bash
 cargo fmt --check
@@ -54,7 +41,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 ```
 
-For Windows host code or manifest changes:
+涉及 Windows host 代码或 manifest 变更时运行：
 
 ```bash
 RUSTFLAGS='-C target-feature=+crt-static' \
@@ -63,17 +50,16 @@ RUSTFLAGS='-C target-feature=+crt-static' \
   cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
-## E2E Environment
+## E2E 环境
 
-Minimum real test topology:
+最小真实测试拓扑：
 
-- Linux/macOS host running `rcw-server` and `rcwctl`.
-- Windows machine or VM running `rcw-host.exe` from an interactive desktop.
-- Windows host can make outbound WebSocket connections to `rcw-server`.
-- Test operator can read the host console for machine ID, TOTP, privilege state,
-  clipboard status, and operation summaries.
+- Linux/macOS 主机运行 `rcw-server` 和 `rcwctl`。
+- Windows 机器或 VM 在交互桌面中运行 `rcw-host.exe`。
+- Windows host 能主动通过 WebSocket 访问 `rcw-server`。
+- 测试人员能读取 host 控制台中的 machine ID、TOTP、权限状态、剪贴板状态和操作摘要。
 
-Server example:
+服务端示例：
 
 ```bash
 export RCW_BIND_ADDR=0.0.0.0:7800
@@ -82,13 +68,13 @@ export RCW_AUDIT_LOG=$PWD/tmp/server-audit.jsonl
 rcw-server
 ```
 
-Host example:
+被控端示例：
 
 ```powershell
 .\rcw-host.exe --server ws://<server-ip>:7800 --totp-period-seconds 120
 ```
 
-Controller example:
+控制端示例：
 
 ```bash
 export RCW_SERVER_URL=ws://<server-ip>:7800
@@ -96,62 +82,58 @@ export RCW_CONTROL_TOKEN=test-control-token
 rcwctl open --id <machine-id> --totp <totp>
 ```
 
-## E2E Checklist
+## E2E 清单
 
-Session and auth:
+会话和鉴权：
 
-- Host can register without a token.
-- Controller cannot open without the correct control token.
-- Wrong TOTP fails.
-- Mismatched TOTP period fails.
-- `status` reports host online and session active after successful open.
-- `close` invalidates the session and removes the local session file.
+- host 无 token 可登记在线。
+- controller 没有正确控制端 token 不能 open。
+- 错误 TOTP 失败。
+- TOTP 周期不一致失败。
+- 成功 open 后，`status` 返回 host online 和 session active。
+- `close` 使 session 失效，并删除本地 session 文件。
 
-Command execution:
+命令执行：
 
-- `exec` returns stdout, stderr, exit code, and duration.
-- A long command times out according to controller timeout settings.
-- Timed-out child process trees are cleaned up.
-- Host console and all audit logs contain the request ID.
+- `exec` 返回 stdout、stderr、退出码和耗时。
+- 长命令按控制端 timeout 设置超时。
+- 超时后的子进程树被清理。
+- host 控制台和三端审计日志都包含 request ID。
 
-File transfer:
+文件传输：
 
-- Upload default behavior does not overwrite existing files.
-- Upload with `--overwrite` can replace a file.
-- Downloaded file SHA-256 matches the source.
-- Corrupt or mismatched transfer returns `checksum_mismatch` or an equivalent
-  structured error.
+- upload 默认不覆盖已有文件。
+- upload 带 `--overwrite` 可以替换文件。
+- download 后 SHA-256 与源文件一致。
+- 损坏或不匹配的传输返回 `checksum_mismatch` 或等价结构化错误。
 
-GUI operations:
+GUI 操作：
 
-- `screenshot` returns a valid non-empty PNG from an interactive desktop.
-- `windows` returns visible windows with handle, title, process ID, rect,
-  visible, and focused fields.
-- Mouse click lands consistently with screenshot coordinates.
-- Text input and common keys work in Notepad or another simple focused app.
-- Locked desktop, UAC secure desktop, or non-interactive session errors are
-  explicit instead of reported as success.
+- `screenshot` 从交互桌面返回有效、非空 PNG。
+- `windows` 返回可见窗口，字段包含 handle、title、process ID、rect、visible 和 focused。
+- 鼠标点击落点与截图坐标一致。
+- 文本输入和常见按键在 Notepad 或其他简单焦点应用中可用。
+- 锁屏、UAC 安全桌面或非交互 session 的错误必须明确，不能伪装成功。
 
-Security and privacy:
+安全和隐私：
 
-- Clipboard text contains only support-safe connection information.
-- Logs do not contain full control tokens, session tokens, TOTP seeds, raw
-  machine identifiers, file contents, or default full command output.
-- Elevated and standard-user host runs display the correct privilege state.
-- The host never triggers UAC by itself.
+- 剪贴板文本只包含可安全转发的连接信息。
+- 日志不包含完整 control token、session token、TOTP seed、原始机器标识、文件内容或默认完整命令输出。
+- elevated 和 standard user host 运行时显示正确权限状态。
+- host 不会自行触发 UAC。
 
-Power behavior:
+电源行为：
 
-- Host process holds display/system power requests while running.
-- Host exit releases the request.
-- The test does not permanently change Windows power plans.
+- host 运行期间持有 display/system 电源请求。
+- host 退出后释放电源请求。
+- 测试不会永久修改 Windows 电源计划。
 
-## Release Gate
+## 发布门槛
 
-Before a release, complete:
+发布前完成：
 
-- Local checks.
-- Windows host cross-build.
-- At least one Windows interactive desktop E2E run.
-- Audit redaction spot-check.
-- SHA-256 checksums for all published artifacts.
+- 本地检查。
+- Windows host 交叉构建。
+- 至少一次 Windows 交互桌面 E2E。
+- 审计脱敏抽查。
+- 所有发布产物的 SHA-256 校验和。

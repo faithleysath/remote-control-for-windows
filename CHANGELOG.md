@@ -1,31 +1,24 @@
-# Changelog
+# 变更日志
 
-All notable changes to this project are tracked here.
+本文件记录项目的重要变更。
 
-## Unreleased
+## 未发布
 
-- Reorganized project documentation for maintenance and iteration.
-- Added standard open-source entry files: `LICENSE`, `CONTRIBUTING.md`,
-  `SECURITY.md`, and this changelog.
+- 将项目文档重组为长期维护和迭代阶段的结构。
+- 增加标准开源项目入口文件：`LICENSE`、`CONTRIBUTING.md`、`SECURITY.md` 和本变更日志。
+- 将新增文档入口汉化，统一文档语言。
 
 ## 0.1.0 - 2026-06-11
 
-- Implemented v1 relay architecture with `rcw-server`, `rcw-host.exe`,
-  `rcwctl`, and shared `rcw-common`.
-- Added session creation with control token plus machine ID/TOTP verification.
-- Added command execution, upload/download, screenshot, window enumeration,
-  mouse input, keyboard input, session status, and session close flows.
-- Added host/controller/server JSONL audit events keyed by request ID.
-- Added visible host console UX with machine ID, TOTP, connection status,
-  privilege state, clipboard status, power request status, and operation
-  summaries.
-- Added Windows clipboard connection-info updates and temporary sleep/display
-  suppression while the host process is running.
-- Added Linux-to-Windows MSVC cross-build support for `rcw-host.exe` with static
-  CRT.
-- Validated the v1 main chain in a Windows VM.
+- 实现 v1 中继架构，包括 `rcw-server`、`rcw-host.exe`、`rcwctl` 和共享 crate `rcw-common`。
+- 增加控制端 token + 机器 ID/TOTP 的会话创建流程。
+- 增加命令执行、上传/下载、截图、窗口枚举、鼠标输入、键盘输入、会话状态和会话关闭流程。
+- 增加 host/controller/server 三端 JSONL 审计事件，并通过 request ID 对齐。
+- 增加可见的 host 控制台体验，包括机器 ID、TOTP、连接状态、权限状态、剪贴板状态、电源请求状态和操作摘要。
+- 增加 Windows 剪贴板连接信息更新，以及 host 进程运行期间的临时防休眠/防熄屏请求。
+- 增加 Linux 到 Windows MSVC 的 `rcw-host.exe` 静态 CRT 交叉构建流程。
+- 在 Windows VM 中验证 v1 主链路。
 
-Known validation gap:
+已知验证缺口：
 
-- Standard-user interactive desktop privilege display still needs final runtime
-  proof. Elevated administrator desktop behavior has been verified.
+- 标准用户交互桌面下的权限显示仍需最终实机确认。管理员 elevated 桌面行为已经验证通过。

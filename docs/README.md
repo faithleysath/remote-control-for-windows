@@ -1,39 +1,26 @@
-# Documentation
+# 文档索引
 
-This directory is the long-lived project documentation set. It separates stable
-project contracts from operational procedures and historical validation notes.
+这个目录保存项目的长期文档。它把稳定的项目契约、操作流程和历史验证记录分开，避免 README 变成过长的混合文档。
 
-## Start Here
+## 推荐先读
 
-- [Project scope](project-scope.md): product purpose, supported workflows,
-  non-goals, and current maintenance baseline.
-- [Architecture](architecture.md): crate responsibilities, runtime topology,
-  state model, and failure handling.
-- [Security model](security.md): authentication, privilege boundaries,
-  visibility guarantees, audit redaction, and explicit non-goals.
+- [项目范围](project-scope.md)：产品目标、支持工作流、非目标和当前维护基线。
+- [技术架构](architecture.md)：crate 职责、运行拓扑、状态模型和失败处理。
+- [安全模型](security.md)：鉴权、权限边界、可见性保证、审计脱敏和明确非目标。
 
-## User And Operator References
+## 用户与操作参考
 
-- [CLI reference](cli.md): `rcwctl` commands, global flags, session behavior,
-  and Codex-oriented usage rules.
-- [Configuration](configuration.md): environment variables, embedded defaults,
-  audit paths, and service deployment notes.
-- [Testing](testing.md): local checks, Windows VM E2E plan, current validation
-  evidence, and remaining proof gaps.
-- [Release process](release.md): release checklist, artifacts, cross-build
-  commands, and verification expectations.
+- [CLI 参考](cli.md)：`rcwctl` 命令、全局参数、session 行为和 Codex 调用约定。
+- [配置说明](configuration.md)：环境变量、编译期嵌入默认值、审计路径和服务部署说明。
+- [测试与验证](testing.md)：本地检查、Windows VM E2E 计划、当前验证证据和剩余验证缺口。
+- [发布流程](release.md)：发布清单、产物、交叉构建命令和验证要求。
 
-## Maintainer References
+## 维护者参考
 
-- [Protocol](protocol.md): WebSocket endpoints, JSON messages, binary frame
-  use, command types, errors, and compatibility rules.
-- [Windows implementation notes](windows-apis.md): Win32 APIs and platform
-  behavior used by `rcw-host.exe`.
-- [Roadmap](roadmap.md): completed v1 baseline, maintenance priorities, and
-  features that are intentionally out of scope.
+- [协议设计](protocol.md)：WebSocket 端点、JSON 消息、binary frame 使用方式、命令类型、错误码和兼容性规则。
+- [Windows 实现说明](windows-apis.md)：`rcw-host.exe` 使用的 Win32 API 和平台行为。
+- [路线图](roadmap.md)：已完成的 v1 基线、维护优先级和明确不做的能力。
 
-## Removed Historical Docs
+## 已移除的历史文档
 
-The early planning documents were folded into the documents above after v1
-reached a mostly closed loop. Future changes should update the stable contracts
-directly instead of adding new one-off planning docs.
+早期规划文档已经在 v1 基本闭环后合并进上述长期文档。后续改动应直接更新稳定契约，不再新增一次性的从零规划文档。

@@ -15,7 +15,7 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 ## Rust Workspace
 
-Workspace structure:
+Workspace 结构：
 
 ```text
 remote-control-for-windows/
@@ -52,7 +52,7 @@ remote-control-for-windows/
 - 输出结构化日志。
 - 写入服务端审计日志，记录认证、会话、命令中继和断开事件。
 
-Implementation stack:
+实现技术栈：
 
 - `tokio` 作为异步运行时。
 - `axum` 提供 HTTP/WebSocket。
@@ -74,7 +74,7 @@ Implementation stack:
 - 调用 Windows API 完成截图、鼠标、键盘和窗口枚举。
 - 在控制台实时显示操作审计摘要，并写入被控端本地审计日志。
 
-Implementation stack:
+实现技术栈：
 
 - `tokio` 处理网络和命令调度。
 - `windows` crate 调用 Win32 API。
@@ -94,7 +94,7 @@ Implementation stack:
 - 支持 JSON 输出。
 - 写入控制端本地审计日志。
 
-Implementation stack:
+实现技术栈：
 
 - `clap` 定义子命令。
 - `directories` 管理本地状态路径。
@@ -169,10 +169,9 @@ Implementation stack:
 
 ## 并发模型
 
-- The current baseline allows one active session per host at a time.
+- 当前基线中，一个被控端同一时间只允许一个 active session。
 - 同一 session 内命令默认串行执行，避免鼠标键盘和截图状态混乱。
-- File transfer is treated as a long-running command and is not run in parallel
-  with other commands in the current baseline.
+- 当前基线中，文件传输作为长命令处理，不与其他命令并发执行。
 - 后续可以扩展为命令执行并发、输入类命令串行。
 
 ## 失败处理
@@ -186,7 +185,7 @@ Implementation stack:
 
 ## 部署模型
 
-Recommended single-process deployment:
+推荐单进程部署：
 
 ```text
 Internet / VPN

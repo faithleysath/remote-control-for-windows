@@ -1,34 +1,24 @@
-# Security Policy
+# 安全策略
 
-Remote Control for Windows is intended for explicit, temporary support sessions.
-Security reports should avoid public disclosure until a maintainer has reviewed
-the issue and a fix or mitigation is available.
+Remote Control for Windows 仅用于明确授权的临时支持会话。涉及安全问题的报告应先私下提交给维护者，在维护者确认并准备修复或缓解措施前，不应公开披露。
 
-## Supported Versions
+## 支持版本
 
-The current `main` branch is the active development and maintenance line. No
-separate stable release branches are maintained yet.
+当前 `main` 分支是活跃开发和维护线。目前还没有单独维护稳定发布分支。
 
-## Reporting a Vulnerability
+## 报告漏洞
 
-Until a public security contact is configured, report vulnerabilities through
-the maintainer's existing private project-support channel. Do not open a public
-issue for vulnerabilities involving authentication bypass, token exposure,
-stealth behavior, persistence, privilege escalation, command execution, file
-transfer, or audit-log redaction.
+在公开安全联系人配置完成前，请通过维护者现有的私有项目支持渠道报告漏洞。涉及鉴权绕过、token 暴露、静默行为、持久化、权限提升、命令执行、文件传输或审计脱敏的问题，不要直接提交公开 issue。
 
-Please include:
+报告中请包含：
 
-- Affected commit or release.
-- Reproduction steps.
-- Expected and actual behavior.
-- Whether a control token, session token, TOTP seed, raw machine identifier, or
-  customer data could be exposed.
+- 受影响的 commit 或 release。
+- 复现步骤。
+- 预期行为和实际行为。
+- 是否可能暴露控制端 token、session token、TOTP seed、原始机器标识或客户数据。
 
-## Security Boundaries
+## 安全边界
 
-The project does not accept features that add stealth, persistence, automatic
-UAC elevation, UAC bypass, keylogging, driver installation, process injection,
-or hidden background control.
+项目不接受会引入静默控制、持久化、自动 UAC 提权、UAC 绕过、键盘记录、驱动安装、进程注入或隐藏后台控制的功能。
 
-See [docs/security.md](docs/security.md) for the full product security model.
+完整产品安全模型见 [docs/security.md](docs/security.md)。
