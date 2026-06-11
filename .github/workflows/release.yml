@@ -24,8 +24,6 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-        with:
           components: rustfmt, clippy
       - name: Run verification
         run: |
