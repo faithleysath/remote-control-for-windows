@@ -35,7 +35,7 @@ const variants = [
   },
   {
     dir: "win32-arm64",
-    name: "rcwctl-win32-arm64",
+    name: "rcwctl-windows-arm64",
     os: ["win32"],
     cpu: ["arm64"],
     binary: "bin/rcwctl.exe"

@@ -6,7 +6,7 @@
 
 ## 版本策略
 
-workspace 当前版本为 `0.1.0`。在采用更完整的兼容性策略前：
+workspace 当前版本为 `0.1.1`。在采用更完整的兼容性策略前：
 
 - patch release 不应破坏协议语义或 CLI 行为。
 - 破坏 wire format 的改动必须提升协议版本。
@@ -17,11 +17,11 @@ workspace 当前版本为 `0.1.0`。在采用更完整的兼容性策略前：
 推荐使用 tag 触发：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写 tag，例如 `v0.1.0`。手动运行时 workflow 会以当前 commit 为目标创建 release tag。
+也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写 tag，例如 `v0.1.1`。手动运行时 workflow 会以当前 commit 为目标创建 release tag。
 
 ## 发布前清单
 
@@ -71,7 +71,7 @@ npm 侧会发布一个元包和六个平台包：
 - `rcwctl-darwin-x64`
 - `rcwctl-darwin-arm64`
 - `rcwctl-win32-x64`
-- `rcwctl-win32-arm64`
+- `rcwctl-windows-arm64`
 
 元包通过 `optionalDependencies` 自动选择当前平台对应的平台包，平台包里直接包含 `rcwctl` 二进制。
 
@@ -121,7 +121,7 @@ npm packages:
   rcwctl-darwin-x64
   rcwctl-darwin-arm64
   rcwctl-win32-x64
-  rcwctl-win32-arm64
+  rcwctl-windows-arm64
 ```
 
 `rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。

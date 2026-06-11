@@ -7,7 +7,7 @@
 - `rcwctl-darwin-x64`
 - `rcwctl-darwin-arm64`
 - `rcwctl-win32-x64`
-- `rcwctl-win32-arm64`
+- `rcwctl-windows-arm64`
 
 ```bash
 npm install -g rcwctl

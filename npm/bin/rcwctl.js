@@ -9,7 +9,7 @@ const packages = {
   "darwin:x64": "rcwctl-darwin-x64",
   "linux:arm64": "rcwctl-linux-arm64",
   "linux:x64": "rcwctl-linux-x64",
-  "win32:arm64": "rcwctl-win32-arm64",
+  "win32:arm64": "rcwctl-windows-arm64",
   "win32:x64": "rcwctl-win32-x64"
 };
 const executable = process.platform === "win32" ? "rcwctl.exe" : "rcwctl";

@@ -4,6 +4,10 @@
 
 ## 未发布
 
+## 0.1.1 - 2026-06-11
+
+- 修复 npm 首发恢复路径，将 Windows arm64 平台包改为 `rcwctl-windows-arm64` 以避开 registry 对 `rcwctl-win32-arm64` 的误拦截。
+- 增强发布 workflow 的恢复能力：GitHub Release 已存在时覆盖上传 assets，npm 包版本已存在时跳过发布。
 - 增加 `rcwctl` 元包和按平台拆分的 npm 二进制包，方便镜像环境直接分发预编译控制端 CLI。
 - 扩展自动发布流水线，覆盖 Linux/macOS/Windows 的 x86-64 和 arm64 目标。
 - 将项目文档重组为长期维护和迭代阶段的结构。

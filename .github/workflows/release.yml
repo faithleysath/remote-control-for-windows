@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.0"
+        description: "Release tag, for example v0.1.1"
         required: true
         type: string
 
@@ -193,13 +193,21 @@ jobs:
       - name: Create GitHub release
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" \
-            dist/release/*.tar.gz \
-            dist/release/*.zip \
-            dist/release/checksums.txt \
-            --target "$GITHUB_SHA" \
-            --title "$RELEASE_TAG" \
-            --notes "Automated release for $RELEASE_TAG."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" \
+              dist/release/*.tar.gz \
+              dist/release/*.zip \
+              dist/release/checksums.txt \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              dist/release/*.tar.gz \
+              dist/release/*.zip \
+              dist/release/checksums.txt \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes "Automated release for $RELEASE_TAG."
+          fi
 
   publish-npm:
     needs: publish
@@ -291,12 +299,31 @@ jobs:
       - name: Publish platform packages
         run: |
           set -euo pipefail
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/linux-x64
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/linux-arm64
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/darwin-x64
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/darwin-arm64
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/win32-x64
-          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/win32-arm64
+          publish_if_missing() {
+            package_dir="$1"
+            package_name="$(node -p "require('./dist/npm/${package_dir}/package.json').name")"
+            package_version="$(node -p "require('./dist/npm/${package_dir}/package.json').version")"
+            if npm view "${package_name}@${package_version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+              echo "Skipping ${package_name}@${package_version}; already published."
+              return
+            fi
+            npm publish --access public --registry=https://registry.npmjs.org "./dist/npm/${package_dir}"
+          }
+
+          publish_if_missing linux-x64
+          publish_if_missing linux-arm64
+          publish_if_missing darwin-x64
+          publish_if_missing darwin-arm64
+          publish_if_missing win32-x64
+          publish_if_missing win32-arm64
       - name: Publish npm package
         working-directory: npm
-        run: npm publish --access public --registry=https://registry.npmjs.org
+        run: |
+          set -euo pipefail
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "${package_name}@${package_version}" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "Skipping ${package_name}@${package_version}; already published."
+            exit 0
+          fi
+          npm publish --access public --registry=https://registry.npmjs.org
