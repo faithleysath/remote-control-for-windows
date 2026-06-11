@@ -26,7 +26,7 @@ impl PowerGuard {
             if previous == 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
-            return Ok(Self { active: true });
+            Ok(Self { active: true })
         }
 
         #[cfg(not(windows))]
@@ -61,7 +61,7 @@ impl Drop for PowerGuard {
 pub fn stable_machine_material() -> Result<Vec<u8>> {
     #[cfg(windows)]
     {
-        return windows_impl::stable_machine_material();
+        windows_impl::stable_machine_material()
     }
 
     #[cfg(not(windows))]
@@ -95,7 +95,7 @@ pub fn default_audit_path() -> PathBuf {
 pub fn is_elevated() -> bool {
     #[cfg(windows)]
     {
-        return windows_impl::is_elevated();
+        windows_impl::is_elevated()
     }
 
     #[cfg(not(windows))]
@@ -107,7 +107,7 @@ pub fn is_elevated() -> bool {
 pub fn copy_connection_info(text: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::copy_connection_info(text);
+        windows_impl::copy_connection_info(text)
     }
 
     #[cfg(not(windows))]
@@ -122,7 +122,7 @@ pub fn copy_connection_info(text: &str) -> Result<()> {
 pub fn screenshot_png(display: Option<u32>) -> Result<Vec<u8>> {
     #[cfg(windows)]
     {
-        return windows_impl::screenshot_png(display);
+        windows_impl::screenshot_png(display)
     }
 
     #[cfg(not(windows))]
@@ -137,7 +137,7 @@ pub fn screenshot_png(display: Option<u32>) -> Result<Vec<u8>> {
 pub fn list_windows() -> Result<Vec<WindowInfo>> {
     #[cfg(windows)]
     {
-        return windows_impl::list_windows();
+        windows_impl::list_windows()
     }
 
     #[cfg(not(windows))]
@@ -151,7 +151,7 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
 pub fn mouse_move(x: i32, y: i32) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::mouse_move(x, y);
+        windows_impl::mouse_move(x, y)
     }
 
     #[cfg(not(windows))]
@@ -166,7 +166,7 @@ pub fn mouse_move(x: i32, y: i32) -> Result<()> {
 pub fn mouse_click(x: i32, y: i32, button: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::mouse_click(x, y, button);
+        windows_impl::mouse_click(x, y, button)
     }
 
     #[cfg(not(windows))]
@@ -181,7 +181,7 @@ pub fn mouse_click(x: i32, y: i32, button: &str) -> Result<()> {
 pub fn mouse_scroll(delta: i32) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::mouse_scroll(delta);
+        windows_impl::mouse_scroll(delta)
     }
 
     #[cfg(not(windows))]
@@ -196,7 +196,7 @@ pub fn mouse_scroll(delta: i32) -> Result<()> {
 pub fn keyboard_type(text: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::keyboard_type(text);
+        windows_impl::keyboard_type(text)
     }
 
     #[cfg(not(windows))]
@@ -211,7 +211,7 @@ pub fn keyboard_type(text: &str) -> Result<()> {
 pub fn keyboard_key(key: &str) -> Result<()> {
     #[cfg(windows)]
     {
-        return windows_impl::keyboard_key(key);
+        windows_impl::keyboard_key(key)
     }
 
     #[cfg(not(windows))]
@@ -232,7 +232,7 @@ pub fn kill_process_tree(pid: u32) -> Result<()> {
         if !status.success() {
             return Err(anyhow!("taskkill failed for pid {pid}"));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
@@ -263,26 +263,27 @@ pub fn unix_now() -> u64 {
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::{ffi::c_void, mem::size_of, ptr::copy_nonoverlapping};
+    use std::{
+        ffi::c_void,
+        mem::size_of,
+        ptr::{copy_nonoverlapping, null_mut},
+    };
 
     use anyhow::{anyhow, Result};
     use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
     use rcw_common::protocol::{RectInfo, WindowInfo};
     use windows::{
-        core::{w, PWSTR},
+        core::w,
         Win32::{
-            Foundation::{CloseHandle, BOOL, HANDLE, HGLOBAL, HWND, LPARAM, RECT},
+            Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, RECT},
             Graphics::Gdi::{
                 BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-                GetDIBits, GetSystemMetrics, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-                BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-                SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SRCCOPY,
+                GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+                DIB_RGB_COLORS, HBITMAP, HGDIOBJ, SRCCOPY,
             },
             Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
             System::{
-                DataExchange::{
-                    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData, CF_UNICODETEXT,
-                },
+                DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
                 Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
                 Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ},
                 Threading::{GetCurrentProcess, OpenProcessToken},
@@ -296,12 +297,19 @@ mod windows_impl {
                     VK_MENU, VK_SHIFT,
                 },
                 WindowsAndMessaging::{
-                    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-                    GetWindowThreadProcessId, IsWindowVisible, SetCursorPos,
+                    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+                    GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SetCursorPos,
+                    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                 },
             },
         },
     };
+
+    const CF_UNICODETEXT: u32 = 13;
+
+    fn null_hwnd() -> HWND {
+        HWND(null_mut())
+    }
 
     pub fn stable_machine_material() -> Result<Vec<u8>> {
         let mut bytes = vec![0_u8; 512];
@@ -325,7 +333,7 @@ mod windows_impl {
     pub fn is_elevated() -> bool {
         unsafe {
             let mut token = HANDLE::default();
-            if !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).as_bool() {
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
                 return false;
             }
             let mut elevation = TOKEN_ELEVATION::default();
@@ -337,7 +345,7 @@ mod windows_impl {
                 size_of::<TOKEN_ELEVATION>() as u32,
                 &mut returned,
             )
-            .as_bool();
+            .is_ok();
             let _ = CloseHandle(token);
             ok && elevation.TokenIsElevated != 0
         }
@@ -349,28 +357,32 @@ mod windows_impl {
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
         unsafe {
-            if !OpenClipboard(HWND(0)).as_bool() {
-                return Err(anyhow!("OpenClipboard failed"));
-            }
-            EmptyClipboard();
+            OpenClipboard(null_hwnd()).map_err(|err| anyhow!("OpenClipboard failed: {err}"))?;
+            EmptyClipboard().map_err(|err| {
+                let _ = CloseClipboard();
+                anyhow!("EmptyClipboard failed: {err}")
+            })?;
             let bytes = wide.len() * size_of::<u16>();
-            let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
-            if handle.0 == 0 {
-                CloseClipboard();
+            let handle = GlobalAlloc(GMEM_MOVEABLE, bytes).map_err(|err| {
+                let _ = CloseClipboard();
+                anyhow!("GlobalAlloc failed: {err}")
+            })?;
+            if handle.is_invalid() {
+                let _ = CloseClipboard();
                 return Err(anyhow!("GlobalAlloc failed"));
             }
             let ptr = GlobalLock(handle) as *mut u16;
             if ptr.is_null() {
-                CloseClipboard();
+                let _ = CloseClipboard();
                 return Err(anyhow!("GlobalLock failed"));
             }
             copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-            GlobalUnlock(handle);
-            if SetClipboardData(CF_UNICODETEXT, HANDLE(handle.0)).0 == 0 {
-                CloseClipboard();
-                return Err(anyhow!("SetClipboardData failed"));
+            let _ = GlobalUnlock(handle);
+            if let Err(err) = SetClipboardData(CF_UNICODETEXT, HANDLE(handle.0)) {
+                let _ = CloseClipboard();
+                return Err(anyhow!("SetClipboardData failed: {err}"));
             }
-            CloseClipboard();
+            let _ = CloseClipboard();
         }
         Ok(())
     }
@@ -384,21 +396,28 @@ mod windows_impl {
             if width <= 0 || height <= 0 {
                 return Err(anyhow!("no interactive desktop dimensions available"));
             }
-            let screen = GetDC(HWND(0));
+            let screen = GetDC(null_hwnd());
+            if screen.is_invalid() {
+                return Err(anyhow!("GetDC failed"));
+            }
             let memory = CreateCompatibleDC(screen);
+            if memory.is_invalid() {
+                ReleaseDC(null_hwnd(), screen);
+                return Err(anyhow!("CreateCompatibleDC failed"));
+            }
             let bitmap = CreateCompatibleBitmap(screen, width, height);
-            if bitmap.0 == 0 {
-                ReleaseDC(HWND(0), screen);
-                DeleteDC(memory);
+            if bitmap.is_invalid() {
+                ReleaseDC(null_hwnd(), screen);
+                let _ = DeleteDC(memory);
                 return Err(anyhow!("CreateCompatibleBitmap failed"));
             }
             let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
-            if !BitBlt(memory, 0, 0, width, height, screen, left, top, SRCCOPY).as_bool() {
+            if let Err(err) = BitBlt(memory, 0, 0, width, height, screen, left, top, SRCCOPY) {
                 SelectObject(memory, previous);
-                DeleteObject(HGDIOBJ(bitmap.0));
-                DeleteDC(memory);
-                ReleaseDC(HWND(0), screen);
-                return Err(anyhow!("BitBlt failed"));
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(memory);
+                ReleaseDC(null_hwnd(), screen);
+                return Err(anyhow!("BitBlt failed: {err}"));
             }
             let stride = (width as usize) * 4;
             let mut bgra = vec![0_u8; stride * height as usize];
@@ -424,9 +443,9 @@ mod windows_impl {
                 DIB_RGB_COLORS,
             );
             SelectObject(memory, previous);
-            DeleteObject(HGDIOBJ(bitmap.0));
-            DeleteDC(memory);
-            ReleaseDC(HWND(0), screen);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(memory);
+            ReleaseDC(null_hwnd(), screen);
             if rows == 0 {
                 return Err(anyhow!("GetDIBits failed"));
             }
@@ -438,7 +457,7 @@ mod windows_impl {
                 &bgra,
                 width as u32,
                 height as u32,
-                ColorType::Rgba8,
+                ColorType::Rgba8.into(),
             )?;
             Ok(png)
         }
@@ -451,7 +470,7 @@ mod windows_impl {
                 return BOOL(1);
             }
             let mut title = vec![0_u16; 512];
-            let len = GetWindowTextW(hwnd, PWSTR(title.as_mut_ptr()), title.len() as i32);
+            let len = GetWindowTextW(hwnd, &mut title);
             if len <= 0 {
                 return BOOL(1);
             }
@@ -459,7 +478,7 @@ mod windows_impl {
             let mut pid = 0_u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             let mut rect = RECT::default();
-            if !GetWindowRect(hwnd, &mut rect).as_bool() {
+            if GetWindowRect(hwnd, &mut rect).is_err() {
                 return BOOL(1);
             }
             let focused = GetForegroundWindow() == hwnd;
@@ -481,15 +500,15 @@ mod windows_impl {
 
         let mut items = Vec::new();
         unsafe {
-            EnumWindows(Some(enum_proc), LPARAM(&mut items as *mut _ as isize));
+            EnumWindows(Some(enum_proc), LPARAM(&mut items as *mut _ as isize))?;
         }
         Ok(items)
     }
 
     pub fn mouse_move(x: i32, y: i32) -> Result<()> {
         unsafe {
-            if !SetCursorPos(x, y).as_bool() {
-                return Err(anyhow!("SetCursorPos failed"));
+            if let Err(err) = SetCursorPos(x, y) {
+                return Err(anyhow!("SetCursorPos failed: {err}"));
             }
         }
         Ok(())
@@ -538,7 +557,7 @@ mod windows_impl {
         flags: windows::Win32::UI::Input::KeyboardAndMouse::MOUSE_EVENT_FLAGS,
         data: i32,
     ) -> Result<()> {
-        let mut input = INPUT {
+        let input = INPUT {
             r#type: INPUT_MOUSE,
             Anonymous: INPUT_0 {
                 mi: MOUSEINPUT {
@@ -548,7 +567,7 @@ mod windows_impl {
                 },
             },
         };
-        let sent = unsafe { SendInput(&mut [input], size_of::<INPUT>() as i32) };
+        let sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
         if sent == 0 {
             return Err(anyhow!("SendInput mouse failed"));
         }
@@ -580,11 +599,11 @@ mod windows_impl {
     }
 
     fn send_keyboard(ki: KEYBDINPUT) -> Result<()> {
-        let mut input = INPUT {
+        let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 { ki },
         };
-        let sent = unsafe { SendInput(&mut [input], size_of::<INPUT>() as i32) };
+        let sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
         if sent == 0 {
             return Err(anyhow!("SendInput keyboard failed"));
         }
