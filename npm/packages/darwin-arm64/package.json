@@ -1,0 +1,28 @@
+{
+  "name": "@faithleysath/rcwctl-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt rcwctl binary for macOS arm64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faithleysath/remote-control-for-windows.git",
+    "directory": "npm/packages/darwin-arm64"
+  },
+  "homepage": "https://github.com/faithleysath/remote-control-for-windows#readme",
+  "bugs": {
+    "url": "https://github.com/faithleysath/remote-control-for-windows/issues"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "bin": {
+    "rcwctl": "bin/rcwctl"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ]
+}

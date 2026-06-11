@@ -235,6 +235,61 @@ jobs:
           NODE
           npm test
           npm run pack:check
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Stage npm packages
+        run: |
+          set -euo pipefail
+          rm -rf dist/npm
+          mkdir -p dist/npm
+
+          stage_package() {
+            target="$1"
+            package_dir="$2"
+            archive="$3"
+            binary="$4"
+
+            temp_dir="$(mktemp -d)"
+            if [[ "$archive" == *.tar.gz ]]; then
+              tar -xzf "dist/release/$archive" -C "$temp_dir"
+            else
+              python3 -m zipfile -e "dist/release/$archive" "$temp_dir"
+            fi
+
+            mkdir -p "dist/npm/$package_dir/bin"
+            cp "npm/packages/$package_dir/package.json" "dist/npm/$package_dir/package.json"
+            cp "npm/packages/$package_dir/README.md" "dist/npm/$package_dir/README.md"
+            cp "$temp_dir/rcw-tools-$target/$binary" "dist/npm/$package_dir/bin/$binary"
+            chmod 755 "dist/npm/$package_dir/bin/$binary"
+            rm -rf "$temp_dir"
+          }
+
+          stage_package x86_64-unknown-linux-gnu linux-x64 rcw-tools-x86_64-unknown-linux-gnu.tar.gz rcwctl
+          stage_package aarch64-unknown-linux-gnu linux-arm64 rcw-tools-aarch64-unknown-linux-gnu.tar.gz rcwctl
+          stage_package x86_64-apple-darwin darwin-x64 rcw-tools-x86_64-apple-darwin.tar.gz rcwctl
+          stage_package aarch64-apple-darwin darwin-arm64 rcw-tools-aarch64-apple-darwin.tar.gz rcwctl
+          stage_package x86_64-pc-windows-msvc win32-x64 rcw-tools-x86_64-pc-windows-msvc.zip rcwctl.exe
+          stage_package aarch64-pc-windows-msvc win32-arm64 rcw-tools-aarch64-pc-windows-msvc.zip rcwctl.exe
+      - name: Check staged npm packages
+        run: |
+          set -euo pipefail
+          npm pack --dry-run ./dist/npm/linux-x64
+          npm pack --dry-run ./dist/npm/linux-arm64
+          npm pack --dry-run ./dist/npm/darwin-x64
+          npm pack --dry-run ./dist/npm/darwin-arm64
+          npm pack --dry-run ./dist/npm/win32-x64
+          npm pack --dry-run ./dist/npm/win32-arm64
+      - name: Publish platform packages
+        run: |
+          set -euo pipefail
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/linux-x64
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/linux-arm64
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/darwin-x64
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/darwin-arm64
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/win32-x64
+          npm publish --access public --registry=https://registry.npmjs.org ./dist/npm/win32-arm64
       - name: Publish npm package
         working-directory: npm
         run: npm publish --access public --registry=https://registry.npmjs.org

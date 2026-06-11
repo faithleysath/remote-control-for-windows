@@ -2,7 +2,7 @@
 
 项目使用 GitHub Actions 自动化发布流水线：`.github/workflows/release.yml`。发布 workflow 会在干净 runner 中完成校验、构建、打包、生成 SHA-256，并创建 GitHub Release。
 
-发布流水线还会发布 npm 包 `@faithleysath/rcwctl`。该 npm 包是薄包装器：安装时从同版本 GitHub Release 下载预编译 `rcwctl`，不会在用户机器上编译 Rust。
+发布流水线还会发布 npm 包 `@faithleysath/rcwctl` 以及对应的平台二进制包。npm 元包负责把 `rcwctl` 暴露成一个统一命令，平台包负责把预编译二进制直接放进 npm tarball，这样 npm 镜像也能完整分发。
 
 ## 版本策略
 
@@ -47,8 +47,8 @@ git push origin v0.1.0
 5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
 6. 确认发布产物不需要任何 secret 或本地配置文件。
 7. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
-8. 确认 `npm/package.json` 版本号与 tag 去掉 `v` 后一致。
-9. 确认 npmjs 已为 `@faithleysath/rcwctl` 配置 GitHub Actions trusted publishing。当前 workflow 不使用 npm token；如果后续改为 token 模式，需要同步调整 `publish-npm` job。
+8. 确认 `npm/package.json` 和 `npm/packages/*/package.json` 的版本号与 tag 去掉 `v` 后一致。
+9. 确认 npmjs 已为这 7 个 npm 包分别配置 GitHub Actions trusted publishing。当前 workflow 不使用 npm token；如果后续改为 token 模式，需要同步调整 `publish-npm` job。
 
 ## 目标平台
 
@@ -63,7 +63,17 @@ git push origin v0.1.0
 
 `rcwctl` 和 `rcw-server` 会发布到上述全部目标。`rcw-host.exe` 只发布 Windows x86-64 和 Windows arm64。
 
-npm 包 `@faithleysath/rcwctl` 支持从上述 Linux、macOS 和 Windows 的 `rcw-tools-*` 产物中安装 `rcwctl`。npm 包不包含 `rcw-server` 或 `rcw-host.exe`。
+npm 侧会发布一个元包和六个平台包：
+
+- `@faithleysath/rcwctl`
+- `@faithleysath/rcwctl-linux-x64`
+- `@faithleysath/rcwctl-linux-arm64`
+- `@faithleysath/rcwctl-darwin-x64`
+- `@faithleysath/rcwctl-darwin-arm64`
+- `@faithleysath/rcwctl-win32-x64`
+- `@faithleysath/rcwctl-win32-arm64`
+
+元包通过 `optionalDependencies` 自动选择当前平台对应的平台包，平台包里直接包含 `rcwctl` 二进制。
 
 ## 本地构建命令
 
@@ -104,23 +114,30 @@ GitHub Release assets:
   rcw-host-aarch64-pc-windows-msvc.zip
   checksums.txt
 
-npm package:
+npm packages:
   @faithleysath/rcwctl
+  @faithleysath/rcwctl-linux-x64
+  @faithleysath/rcwctl-linux-arm64
+  @faithleysath/rcwctl-darwin-x64
+  @faithleysath/rcwctl-darwin-arm64
+  @faithleysath/rcwctl-win32-x64
+  @faithleysath/rcwctl-win32-arm64
 ```
 
 `rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。
 
-`@faithleysath/rcwctl` 的 `postinstall` 脚本根据用户平台下载同版本 GitHub Release 中的 `rcw-tools-*` 包，并只安装其中的 `rcwctl`。
+`@faithleysath/rcwctl` 不再走 `postinstall` 下载 GitHub Release；它只负责把平台包作为依赖暴露给用户。
 
 ## npm 发布
 
 发布 workflow 的 `publish-npm` job 在 GitHub Release 创建成功后运行：
 
-1. 使用 Node.js 检查 `npm/package.json` 版本是否匹配 release tag。
+1. 使用 Node.js 检查 `npm/package.json` 和平台包版本是否匹配 release tag。
 2. 运行 `npm test` 和 `npm run pack:check`。
-3. 执行 `npm publish --access public --registry=https://registry.npmjs.org`。
+3. 从 build artifacts 里为每个平台包补入 `rcwctl` 二进制。
+4. 执行 `npm publish --access public --registry=https://registry.npmjs.org`，先发平台包，再发元包。
 
-当前设计优先使用 npm trusted publishing，因此 workflow 给 `publish-npm` job 开启 `id-token: write` 权限，不在仓库中保存 npm token。首次发布前需要在 npmjs 上把 GitHub 仓库 `faithleysath/remote-control-for-windows` 的 `Release` workflow 配置为 `@faithleysath/rcwctl` 的 trusted publisher。
+当前设计优先使用 npm trusted publishing，因此 workflow 给 `publish-npm` job 开启 `id-token: write` 权限，不在仓库中保存 npm token。首次发布前需要在 npmjs 上把这个仓库的 `Release` workflow 配置为 trusted publisher。
 
 ## Windows Host 验证
 

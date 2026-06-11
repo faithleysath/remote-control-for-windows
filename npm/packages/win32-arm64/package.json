@@ -1,0 +1,28 @@
+{
+  "name": "@faithleysath/rcwctl-win32-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt rcwctl binary for Windows arm64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faithleysath/remote-control-for-windows.git",
+    "directory": "npm/packages/win32-arm64"
+  },
+  "homepage": "https://github.com/faithleysath/remote-control-for-windows#readme",
+  "bugs": {
+    "url": "https://github.com/faithleysath/remote-control-for-windows/issues"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "bin": {
+    "rcwctl": "bin/rcwctl.exe"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ]
+}

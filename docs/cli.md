@@ -11,7 +11,7 @@ npm install -g @faithleysath/rcwctl
 rcwctl --version
 ```
 
-npm 包安装时会从 GitHub Release 下载与包版本一致的 `rcw-tools-*` 产物，并把其中的 `rcwctl` 放入包内 `vendor/` 目录。用户不需要安装 Rust 编译环境。
+npm 元包会按平台自动安装对应的二进制包，二进制直接随 npm tarball 发布。用户不需要安装 Rust 编译环境，国内 npm 镜像也能直接分发这条链路。
 
 开发者也可以从源码运行：
 
