@@ -116,7 +116,7 @@ jobs:
           else
             tar -C dist -czf "dist/release/${package}.tar.gz" "${package}"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rcw-tools-${{ matrix.target }}
           path: dist/release/*
@@ -158,7 +158,7 @@ jobs:
           cp "target/${target}/release/rcw-host.exe" "dist/${package}/"
           cp README.md CHANGELOG.md LICENSE "dist/${package}/"
           (cd dist && python3 -m zipfile -c "release/${package}.zip" "${package}")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: rcw-host-${{ matrix.target }}
           path: dist/release/*
@@ -180,7 +180,7 @@ jobs:
           else
             echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/release
           merge-multiple: true
@@ -243,7 +243,7 @@ jobs:
           NODE
           npm test
           npm run pack:check
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/release
           merge-multiple: true
