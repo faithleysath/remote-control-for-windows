@@ -4,6 +4,9 @@
 
 ## 未发布
 
+- 切换 npm 发布到 GitHub Actions trusted publishing，移除 `NPM_TOKEN` 依赖。
+- 将下一次发布基线抬到 `0.1.2`。
+
 ## 0.1.1 - 2026-06-11
 
 - 修复 npm 首发恢复路径，将 Windows arm64 平台包改为 `rcwctl-windows-arm64` 以避开 registry 对 `rcwctl-win32-arm64` 的误拦截。
