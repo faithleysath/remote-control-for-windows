@@ -18,3 +18,17 @@ jobs:
         run: cargo test --workspace
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
+
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check npm package
+        working-directory: npm
+        run: |
+          npm test
+          npm run pack:check

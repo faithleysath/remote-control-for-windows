@@ -1,0 +1,37 @@
+{
+  "name": "@faithleysath/rcwctl",
+  "version": "0.1.0",
+  "description": "CLI controller for Remote Control for Windows",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faithleysath/remote-control-for-windows.git",
+    "directory": "npm"
+  },
+  "homepage": "https://github.com/faithleysath/remote-control-for-windows#readme",
+  "bugs": {
+    "url": "https://github.com/faithleysath/remote-control-for-windows/issues"
+  },
+  "bin": {
+    "rcwctl": "bin/rcwctl.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "test": "node --check bin/rcwctl.js && node --check scripts/install.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "vendor/"
+  ],
+  "keywords": [
+    "remote-control",
+    "windows",
+    "cli",
+    "rust"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

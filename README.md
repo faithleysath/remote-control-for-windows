@@ -45,6 +45,13 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 ## 快速开始
 
+安装控制端 CLI：
+
+```bash
+npm install -g @faithleysath/rcwctl
+rcwctl --version
+```
+
 启动本地中继服务器：
 
 ```bash
@@ -65,17 +72,17 @@ cargo run -p rcw-server
 export RCW_SERVER_URL=ws://127.0.0.1:7800
 export RCW_CONTROL_TOKEN='replace-with-a-random-token'
 
-cargo run -p rcwctl -- open --id <machine-id> --totp <current-totp>
-cargo run -p rcwctl -- status
-cargo run -p rcwctl -- exec -- pwsh -NoProfile -Command "hostname"
-cargo run -p rcwctl -- screenshot --output screen.png
-cargo run -p rcwctl -- close
+rcwctl open --id <machine-id> --totp <current-totp>
+rcwctl status
+rcwctl exec -- pwsh -NoProfile -Command "hostname"
+rcwctl screenshot --output screen.png
+rcwctl close
 ```
 
 给 agent 使用时建议开启 JSON 输出：
 
 ```bash
-cargo run -p rcwctl -- --json exec -- pwsh -NoProfile -Command "hostname"
+rcwctl --json exec -- pwsh -NoProfile -Command "hostname"
 ```
 
 ## 构建
@@ -86,6 +93,8 @@ cargo run -p rcwctl -- --json exec -- pwsh -NoProfile -Command "hostname"
 cargo build --workspace
 cargo test --workspace
 ```
+
+如果只需要使用控制端，优先通过 npm 安装预编译 `rcwctl`；本地 Rust 构建主要面向开发和发布验证。
 
 从 Linux 交叉构建 Windows 被控端：
 

@@ -2,6 +2,23 @@
 
 控制端二进制名为 `rcwctl`。它是研发和 Codex 的主要入口。
 
+## 安装
+
+普通用户推荐通过 npm 安装预编译二进制：
+
+```bash
+npm install -g @faithleysath/rcwctl
+rcwctl --version
+```
+
+npm 包安装时会从 GitHub Release 下载与包版本一致的 `rcw-tools-*` 产物，并把其中的 `rcwctl` 放入包内 `vendor/` 目录。用户不需要安装 Rust 编译环境。
+
+开发者也可以从源码运行：
+
+```bash
+cargo run -p rcwctl -- --version
+```
+
 ## 全局参数
 
 ```bash

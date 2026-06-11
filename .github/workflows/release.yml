@@ -200,3 +200,41 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG" \
             --notes "Automated release for $RELEASE_TAG."
+
+  publish-npm:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+      - name: Check npm package
+        working-directory: npm
+        run: |
+          node <<'NODE'
+          const pkg = require("./package.json");
+          const tag = process.env.RELEASE_TAG;
+          const expected = tag.replace(/^v/, "");
+          if (pkg.version !== expected) {
+            console.error(`npm package version ${pkg.version} does not match release tag ${tag}`);
+            process.exit(1);
+          }
+          NODE
+          npm test
+          npm run pack:check
+      - name: Publish npm package
+        working-directory: npm
+        run: npm publish --access public --registry=https://registry.npmjs.org

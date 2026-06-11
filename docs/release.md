@@ -2,6 +2,8 @@
 
 项目使用 GitHub Actions 自动化发布流水线：`.github/workflows/release.yml`。发布 workflow 会在干净 runner 中完成校验、构建、打包、生成 SHA-256，并创建 GitHub Release。
 
+发布流水线还会发布 npm 包 `@faithleysath/rcwctl`。该 npm 包是薄包装器：安装时从同版本 GitHub Release 下载预编译 `rcwctl`，不会在用户机器上编译 Rust。
+
 ## 版本策略
 
 workspace 当前版本为 `0.1.0`。在采用更完整的兼容性策略前：
@@ -45,6 +47,8 @@ git push origin v0.1.0
 5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
 6. 确认发布产物不需要任何 secret 或本地配置文件。
 7. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
+8. 确认 `npm/package.json` 版本号与 tag 去掉 `v` 后一致。
+9. 确认 npmjs 已为 `@faithleysath/rcwctl` 配置 GitHub Actions trusted publishing。当前 workflow 不使用 npm token；如果后续改为 token 模式，需要同步调整 `publish-npm` job。
 
 ## 目标平台
 
@@ -58,6 +62,8 @@ git push origin v0.1.0
 - Windows arm64：`aarch64-pc-windows-msvc`
 
 `rcwctl` 和 `rcw-server` 会发布到上述全部目标。`rcw-host.exe` 只发布 Windows x86-64 和 Windows arm64。
+
+npm 包 `@faithleysath/rcwctl` 支持从上述 Linux、macOS 和 Windows 的 `rcw-tools-*` 产物中安装 `rcwctl`。npm 包不包含 `rcw-server` 或 `rcw-host.exe`。
 
 ## 本地构建命令
 
@@ -97,9 +103,24 @@ GitHub Release assets:
   rcw-host-x86_64-pc-windows-msvc.zip
   rcw-host-aarch64-pc-windows-msvc.zip
   checksums.txt
+
+npm package:
+  @faithleysath/rcwctl
 ```
 
 `rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。
+
+`@faithleysath/rcwctl` 的 `postinstall` 脚本根据用户平台下载同版本 GitHub Release 中的 `rcw-tools-*` 包，并只安装其中的 `rcwctl`。
+
+## npm 发布
+
+发布 workflow 的 `publish-npm` job 在 GitHub Release 创建成功后运行：
+
+1. 使用 Node.js 检查 `npm/package.json` 版本是否匹配 release tag。
+2. 运行 `npm test` 和 `npm run pack:check`。
+3. 执行 `npm publish --access public --registry=https://registry.npmjs.org`。
+
+当前设计优先使用 npm trusted publishing，因此 workflow 给 `publish-npm` job 开启 `id-token: write` 权限，不在仓库中保存 npm token。首次发布前需要在 npmjs 上把 GitHub 仓库 `faithleysath/remote-control-for-windows` 的 `Release` workflow 配置为 `@faithleysath/rcwctl` 的 trusted publisher。
 
 ## Windows Host 验证
 
@@ -114,4 +135,11 @@ GitHub Release assets:
 
 - 给发布 commit 打 tag。
 - 将构建命令、校验和和 E2E 证据随 release notes 保存。
+- 验证 npm 包可安装：
+
+  ```bash
+  npm install -g @faithleysath/rcwctl --registry=https://registry.npmjs.org
+  rcwctl --version
+  ```
+
 - 新发现的运行时缺口应写入 `docs/testing.md` 或 `docs/roadmap.md`，不要只留在聊天记录里。
