@@ -1,4 +1,4 @@
-name: 持续集成
+name: CI
 
 on:
   push:
@@ -12,9 +12,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: 检查格式
+      - name: Check formatting
         run: cargo fmt --check
-      - name: 运行测试
+      - name: Run tests
         run: cargo test --workspace
-      - name: 运行 clippy
+      - name: Run clippy
         run: cargo clippy --workspace -- -D warnings

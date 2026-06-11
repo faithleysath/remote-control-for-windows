@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+      - name: Install Windows target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+      - name: Run verification
+        run: |
+          cargo fmt --check
+          cargo test --workspace
+          cargo clippy --workspace -- -D warnings
+      - name: Run Windows clippy
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo xwin clippy --release --target x86_64-pc-windows-msvc -p rcw-host -p rcwctl -- -D warnings
+      - name: Build Linux artifacts
+        run: cargo build --release -p rcwctl -p rcw-server
+      - name: Build Windows artifacts
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p rcw-host -p rcwctl
+      - name: Package release artifacts
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/release
+
+          mkdir -p dist/rcwctl-x86_64-unknown-linux-gnu
+          cp target/release/rcwctl dist/rcwctl-x86_64-unknown-linux-gnu/
+          cp README.md CHANGELOG.md LICENSE dist/rcwctl-x86_64-unknown-linux-gnu/
+          tar -C dist -czf dist/release/rcwctl-x86_64-unknown-linux-gnu.tar.gz rcwctl-x86_64-unknown-linux-gnu
+
+          mkdir -p dist/rcw-server-x86_64-unknown-linux-gnu
+          cp target/release/rcw-server dist/rcw-server-x86_64-unknown-linux-gnu/
+          cp README.md CHANGELOG.md LICENSE dist/rcw-server-x86_64-unknown-linux-gnu/
+          tar -C dist -czf dist/release/rcw-server-x86_64-unknown-linux-gnu.tar.gz rcw-server-x86_64-unknown-linux-gnu
+
+          mkdir -p dist/rcw-host-x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/rcw-host.exe dist/rcw-host-x86_64-pc-windows-msvc/
+          cp README.md CHANGELOG.md LICENSE dist/rcw-host-x86_64-pc-windows-msvc/
+          (cd dist && python3 -m zipfile -c release/rcw-host-x86_64-pc-windows-msvc.zip rcw-host-x86_64-pc-windows-msvc)
+
+          mkdir -p dist/rcwctl-x86_64-pc-windows-msvc
+          cp target/x86_64-pc-windows-msvc/release/rcwctl.exe dist/rcwctl-x86_64-pc-windows-msvc/
+          cp README.md CHANGELOG.md LICENSE dist/rcwctl-x86_64-pc-windows-msvc/
+          (cd dist && python3 -m zipfile -c release/rcwctl-x86_64-pc-windows-msvc.zip rcwctl-x86_64-pc-windows-msvc)
+
+          (cd dist/release && sha256sum *.tar.gz *.zip > checksums.txt)
+      - name: Create GitHub release
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            dist/release/*.tar.gz \
+            dist/release/*.zip \
+            dist/release/checksums.txt \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --notes "Automated release for $RELEASE_TAG."

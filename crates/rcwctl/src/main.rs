@@ -848,12 +848,15 @@ fn remove_session(cli: &Cli) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn restrict_user_only(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_user_only(_path: &Path) -> Result<()> {
     Ok(())
 }
 
