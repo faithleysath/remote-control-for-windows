@@ -48,7 +48,7 @@ git push origin v0.1.0
 6. 确认发布产物不需要任何 secret 或本地配置文件。
 7. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
 8. 确认 `npm/package.json` 和 `npm/packages/*/package.json` 的版本号与 tag 去掉 `v` 后一致。
-9. 确认 npmjs 已为这 7 个 npm 包分别配置 GitHub Actions trusted publishing。当前 workflow 不使用 npm token；如果后续改为 token 模式，需要同步调整 `publish-npm` job。
+9. 首发阶段确认仓库里已经配置了 `NPM_TOKEN` secret；发布完成后再把这 7 个 npm 包分别切到 GitHub Actions trusted publishing。当前 workflow 先用 npm token 做 bootstrap，后续再同步切换到 OIDC。
 
 ## 目标平台
 
@@ -137,7 +137,7 @@ npm packages:
 3. 从 build artifacts 里为每个平台包补入 `rcwctl` 二进制。
 4. 执行 `npm publish --access public --registry=https://registry.npmjs.org`，先发平台包，再发元包。
 
-当前设计优先使用 npm trusted publishing，因此 workflow 给 `publish-npm` job 开启 `id-token: write` 权限，不在仓库中保存 npm token。首次发布前需要在 npmjs 上把这个仓库的 `Release` workflow 配置为 trusted publisher。
+当前 workflow 先用 `NPM_TOKEN` 做 bootstrap 发布：平台包先发，元包后发。等这 7 个包都存在于 npmjs 后，再迁移到 trusted publishing 并删除 `NPM_TOKEN`。
 
 ## Windows Host 验证
 
