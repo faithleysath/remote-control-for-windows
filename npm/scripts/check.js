@@ -7,42 +7,42 @@ const rootPackage = require(path.join(root, "package.json"));
 const variants = [
   {
     dir: "darwin-arm64",
-    name: "@faithleysath/rcwctl-darwin-arm64",
+    name: "rcwctl-darwin-arm64",
     os: ["darwin"],
     cpu: ["arm64"],
     binary: "bin/rcwctl"
   },
   {
     dir: "darwin-x64",
-    name: "@faithleysath/rcwctl-darwin-x64",
+    name: "rcwctl-darwin-x64",
     os: ["darwin"],
     cpu: ["x64"],
     binary: "bin/rcwctl"
   },
   {
     dir: "linux-arm64",
-    name: "@faithleysath/rcwctl-linux-arm64",
+    name: "rcwctl-linux-arm64",
     os: ["linux"],
     cpu: ["arm64"],
     binary: "bin/rcwctl"
   },
   {
     dir: "linux-x64",
-    name: "@faithleysath/rcwctl-linux-x64",
+    name: "rcwctl-linux-x64",
     os: ["linux"],
     cpu: ["x64"],
     binary: "bin/rcwctl"
   },
   {
     dir: "win32-arm64",
-    name: "@faithleysath/rcwctl-win32-arm64",
+    name: "rcwctl-win32-arm64",
     os: ["win32"],
     cpu: ["arm64"],
     binary: "bin/rcwctl.exe"
   },
   {
     dir: "win32-x64",
-    name: "@faithleysath/rcwctl-win32-x64",
+    name: "rcwctl-win32-x64",
     os: ["win32"],
     cpu: ["x64"],
     binary: "bin/rcwctl.exe"
@@ -60,6 +60,7 @@ function assert(condition, message) {
 }
 
 function main() {
+  assert(rootPackage.name === "rcwctl", "meta package name must be rcwctl");
   assert(!rootPackage.scripts.postinstall, "meta package must not use postinstall");
   assert(rootPackage.bin && rootPackage.bin.rcwctl === "bin/rcwctl.js", "meta package bin entry is invalid");
 

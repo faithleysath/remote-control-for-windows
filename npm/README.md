@@ -1,16 +1,16 @@
-# @faithleysath/rcwctl
+# rcwctl
 
 这是 `rcwctl` 的 npm 元包。安装时会自动拉取当前平台对应的二进制包：
 
-- `@faithleysath/rcwctl-linux-x64`
-- `@faithleysath/rcwctl-linux-arm64`
-- `@faithleysath/rcwctl-darwin-x64`
-- `@faithleysath/rcwctl-darwin-arm64`
-- `@faithleysath/rcwctl-win32-x64`
-- `@faithleysath/rcwctl-win32-arm64`
+- `rcwctl-linux-x64`
+- `rcwctl-linux-arm64`
+- `rcwctl-darwin-x64`
+- `rcwctl-darwin-arm64`
+- `rcwctl-win32-x64`
+- `rcwctl-win32-arm64`
 
 ```bash
-npm install -g @faithleysath/rcwctl
+npm install -g rcwctl
 rcwctl --version
 ```
 

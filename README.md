@@ -48,7 +48,7 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 安装控制端 CLI：
 
 ```bash
-npm install -g @faithleysath/rcwctl
+npm install -g rcwctl
 rcwctl --version
 ```
 

@@ -1,5 +1,5 @@
 {
-  "name": "@faithleysath/rcwctl-darwin-x64",
+  "name": "rcwctl-darwin-x64",
   "version": "0.1.0",
   "description": "Prebuilt rcwctl binary for macOS x64",
   "license": "MIT",

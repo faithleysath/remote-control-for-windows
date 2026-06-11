@@ -2,7 +2,7 @@
 
 项目使用 GitHub Actions 自动化发布流水线：`.github/workflows/release.yml`。发布 workflow 会在干净 runner 中完成校验、构建、打包、生成 SHA-256，并创建 GitHub Release。
 
-发布流水线还会发布 npm 包 `@faithleysath/rcwctl` 以及对应的平台二进制包。npm 元包负责把 `rcwctl` 暴露成一个统一命令，平台包负责把预编译二进制直接放进 npm tarball，这样 npm 镜像也能完整分发。
+发布流水线还会发布 npm 包 `rcwctl` 以及对应的平台二进制包。npm 元包负责把 `rcwctl` 暴露成一个统一命令，平台包负责把预编译二进制直接放进 npm tarball，这样 npm 镜像也能完整分发。
 
 ## 版本策略
 
@@ -65,13 +65,13 @@ git push origin v0.1.0
 
 npm 侧会发布一个元包和六个平台包：
 
-- `@faithleysath/rcwctl`
-- `@faithleysath/rcwctl-linux-x64`
-- `@faithleysath/rcwctl-linux-arm64`
-- `@faithleysath/rcwctl-darwin-x64`
-- `@faithleysath/rcwctl-darwin-arm64`
-- `@faithleysath/rcwctl-win32-x64`
-- `@faithleysath/rcwctl-win32-arm64`
+- `rcwctl`
+- `rcwctl-linux-x64`
+- `rcwctl-linux-arm64`
+- `rcwctl-darwin-x64`
+- `rcwctl-darwin-arm64`
+- `rcwctl-win32-x64`
+- `rcwctl-win32-arm64`
 
 元包通过 `optionalDependencies` 自动选择当前平台对应的平台包，平台包里直接包含 `rcwctl` 二进制。
 
@@ -115,18 +115,18 @@ GitHub Release assets:
   checksums.txt
 
 npm packages:
-  @faithleysath/rcwctl
-  @faithleysath/rcwctl-linux-x64
-  @faithleysath/rcwctl-linux-arm64
-  @faithleysath/rcwctl-darwin-x64
-  @faithleysath/rcwctl-darwin-arm64
-  @faithleysath/rcwctl-win32-x64
-  @faithleysath/rcwctl-win32-arm64
+  rcwctl
+  rcwctl-linux-x64
+  rcwctl-linux-arm64
+  rcwctl-darwin-x64
+  rcwctl-darwin-arm64
+  rcwctl-win32-x64
+  rcwctl-win32-arm64
 ```
 
 `rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。
 
-`@faithleysath/rcwctl` 不再走 `postinstall` 下载 GitHub Release；它只负责把平台包作为依赖暴露给用户。
+`rcwctl` 不再走 `postinstall` 下载 GitHub Release；它只负责把平台包作为依赖暴露给用户。
 
 ## npm 发布
 
@@ -155,7 +155,7 @@ npm packages:
 - 验证 npm 包可安装：
 
   ```bash
-  npm install -g @faithleysath/rcwctl --registry=https://registry.npmjs.org
+  npm install -g rcwctl --registry=https://registry.npmjs.org
   rcwctl --version
   ```
 

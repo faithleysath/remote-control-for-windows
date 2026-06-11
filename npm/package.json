@@ -1,5 +1,5 @@
 {
-  "name": "@faithleysath/rcwctl",
+  "name": "rcwctl",
   "version": "0.1.0",
   "description": "Meta package for the Remote Control for Windows CLI",
   "license": "MIT",
@@ -16,12 +16,12 @@
     "rcwctl": "bin/rcwctl.js"
   },
   "optionalDependencies": {
-    "@faithleysath/rcwctl-darwin-arm64": "0.1.0",
-    "@faithleysath/rcwctl-darwin-x64": "0.1.0",
-    "@faithleysath/rcwctl-linux-arm64": "0.1.0",
-    "@faithleysath/rcwctl-linux-x64": "0.1.0",
-    "@faithleysath/rcwctl-win32-arm64": "0.1.0",
-    "@faithleysath/rcwctl-win32-x64": "0.1.0"
+    "rcwctl-darwin-arm64": "0.1.0",
+    "rcwctl-darwin-x64": "0.1.0",
+    "rcwctl-linux-arm64": "0.1.0",
+    "rcwctl-linux-x64": "0.1.0",
+    "rcwctl-win32-arm64": "0.1.0",
+    "rcwctl-win32-x64": "0.1.0"
   },
   "scripts": {
     "test": "node --check bin/rcwctl.js && node scripts/check.js",

@@ -7,7 +7,7 @@
 普通用户推荐通过 npm 安装预编译二进制：
 
 ```bash
-npm install -g @faithleysath/rcwctl
+npm install -g rcwctl
 rcwctl --version
 ```
 
