@@ -68,7 +68,10 @@
 
 如果被控端检测到当前进程是管理员权限，必须使用醒目颜色高亮显示。该提示不是为了鼓励提权，而是为了让客户和研发明确当前远控动作会拥有更高系统权限。
 
-首版不要求客户逐项确认命令，因为目标是 Codex 高效排障。但不能做隐藏窗口、后台驻留或绕过客户感知的能力。
+The current UX does not require the customer to confirm every individual
+command, because the controller is designed for efficient agent-assisted
+diagnostics. It still must not add hidden windows, background persistence, or
+other behavior that bypasses customer awareness.
 
 ## 权限边界
 
@@ -99,7 +102,9 @@
 
 ## 审计
 
-首版审计采用三端结构化日志，不引入中央数据库。每个操作必须能通过 request ID 在被控端、控制端和服务端日志中对齐。
+The current audit model uses structured logs on all three sides and does not
+introduce a central audit database. Every operation must be correlatable by
+request ID across host, controller, and server logs.
 
 三端职责：
 

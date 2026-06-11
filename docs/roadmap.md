@@ -1,74 +1,64 @@
-# 路线图
+# Roadmap
 
-## v0.1 文档与脚手架
+The project has moved past the initial from-scratch v1 phase. The current
+roadmap focuses on preserving the validated remote-control baseline while
+improving release quality, safety checks, and operator experience.
 
-- 完成产品需求、设计、架构、协议、CLI、安全和配置文档。
-- 明确三端审计日志、被控端实时审计显示和管理员权限高亮需求。
-- 创建 Rust workspace。
-- 建立 `rcw-common`、`rcw-server`、`rcw-host`、`rcwctl` crate。
-- 建立基础 CI：fmt、clippy、test。
+## Completed Baseline
 
-## v0.2 最小可连通版本
+Completed and validated as of 2026-06-11:
 
-- `rcw-server` 支持 `/healthz`、`/ws/host`、`/ws/control`。
-- `rcw-host.exe` 能连接服务器，显示机器 ID 和 TOTP。
-- `rcwctl open/status/close` 可建立和关闭会话。
-- 完成控制端 token + ID/TOTP 鉴权。
-- TOTP 周期默认 120 秒，并支持配置覆盖。
-- 完成 session 文件复用。
-- 被控端启动和 TOTP 刷新时自动复制连接信息到 Windows 剪贴板。
-- 被控端运行期间阻止系统休眠和显示器熄屏。
-- 实现三端基础审计日志和被控端控制台实时操作显示。
-- 实现被控端管理员权限检测和高亮显示。
+- Rust workspace with `rcw-common`, `rcw-server`, `rcw-host`, and `rcwctl`.
+- Host/control WebSocket relay through `rcw-server`.
+- Control token plus machine ID/TOTP session creation.
+- Reusable controller session files with explicit close and server-side session
+  invalidation.
+- Remote command execution with output, exit code, timeout, and process cleanup.
+- Upload/download with chunking and SHA-256 verification.
+- Screenshot, window enumeration, mouse input, and keyboard input.
+- Host clipboard connection info with token/seed redaction.
+- Temporary host-side display/system power requests.
+- Host, controller, and server JSONL audit logs.
+- Linux-to-Windows MSVC host cross-build with static CRT.
+- Windows VM practical E2E coverage for the main workflow.
 
-## v0.3 命令与文件
+## Maintenance Priorities
 
-- 实现 `exec`。
-- 支持 stdout/stderr 流式返回。
-- 支持超时和退出码。
-- 实现 `upload` 和 `download`。
-- 文件传输支持分块和 SHA-256 校验。
+- Close the remaining standard-user interactive desktop validation gap.
+- Add repeatable Windows VM smoke automation around the existing manual E2E
+  checklist.
+- Improve release packaging and checksum generation.
+- Add CI coverage for Linux workspace checks.
+- Add protocol compatibility tests for future message changes.
+- Harden audit redaction tests.
+- Improve operator-facing error messages for common Windows desktop states such
+  as lock screen, UAC secure desktop, and non-interactive session 0.
 
-## v0.4 截图与窗口
+## Candidate Features
 
-- 实现 `screenshot`。
-- 实现 `windows`。
-- 支持多显示器基础信息。
-- CLI 支持 JSON 输出，便于 Codex 分析。
+These are plausible future improvements, not committed release promises:
 
-## v0.5 鼠标与键盘
+- One-command diagnostic bundle collection.
+- Better display selection and coordinate reporting for multi-monitor hosts.
+- Window-relative coordinate helpers.
+- OCR or UI element discovery helpers that keep the current safety model.
+- Controller operation transcripts for post-session review.
+- Optional customer-side allow/deny policy for command categories.
+- Temporary one-time download links for distributing `rcw-host.exe`.
+- Port forwarding through the same relay model, with explicit audit and
+  customer-visible status.
+- Server-side persistent audit storage for deployments that need centralized
+  retention.
 
-- 实现 `move`、`click`、`scroll`。
-- 实现 `type`、`key`。
-- 建立截图、点击、再截图的手工 E2E 验证流程。
+## Explicit Non-Roadmap Items
 
-## v0.6 打包与部署
+The project should not add:
 
-- Windows x64 被控端 release 构建。
-- Linux x64 服务端 release 构建。
-- 跨平台 `rcwctl` release 构建。
-- 支持编译期嵌入服务器地址。
-- 编写部署说明和客户使用说明。
-
-## 后续可能能力
-
-- 控制端操作录制和审计数据库。
-- Web 管理页面。
-- 多操作员账号。
-- P2P 优先、中继兜底。
-- OCR 或 UI 自动定位辅助。
-- 客户侧每类能力授权开关。
-- 临时一次性下载链接。
-- 一键诊断包，例如自动收集系统信息、网络状态、进程/服务摘要和指定产品日志并打包下载。
-- 更强的窗口相对坐标和控件定位。
-- 端口转发能力，包括控制端本地端口转发到被控端可访问地址，以及被控端侧反向端口转发到控制端或服务端可访问地址。
-
-## 暂不进入路线图
-
-- 后台常驻服务。
-- 开机自启。
-- 隐藏运行。
-- UAC 绕过。
-- 内核驱动。
-- 键盘记录。
-- 实时视频流和录像回放。
+- Hidden remote control.
+- Background persistence.
+- Service installation or startup registration.
+- Automatic UAC elevation or UAC bypass.
+- Kernel drivers.
+- Process injection.
+- Keylogging.
+- Background screen recording.

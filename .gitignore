@@ -1,7 +1,11 @@
 /target/
+/release/
+/tmp/
 *.pdb
 *.exe
 *.log
 *.jsonl
+.env
+.env.local
 session.json
 screen.png

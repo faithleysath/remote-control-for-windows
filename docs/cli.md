@@ -131,7 +131,7 @@ rcwctl screenshot --output screen.png
 - `--display <index>`
 - `--format png`
 
-首版只要求 PNG。
+The current implementation supports PNG output.
 
 ## windows
 

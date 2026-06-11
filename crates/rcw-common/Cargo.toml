@@ -3,7 +3,6 @@ name = "rcw-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
 base64.workspace = true
@@ -18,4 +17,3 @@ thiserror.workspace = true
 time.workspace = true
 ulid.workspace = true
 url.workspace = true
-
