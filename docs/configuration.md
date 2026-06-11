@@ -101,7 +101,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 target/x86_64-pc-windows-msvc/release/rcw-host.exe
 ```
 
-使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的实机测试产物为 x86-64 Windows console PE，已在 `/data/windows-vm` 的 Windows VM 中运行通过。
+使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的实机测试产物为 x86-64 Windows console PE，已在维护者本机的 Windows VM 中运行通过。
 
 如果在其他机器上无法使用 `cargo-xwin`，可以改在 Windows builder 上执行同等 release 构建，并记录构建命令和 SHA-256。
 

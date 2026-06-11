@@ -4,7 +4,7 @@
 
 ## 当前验证记录
 
-2026-06-11，v1 在本机 `/data/windows-vm` Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。
+2026-06-11，v1 在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。
 
 已验证：
 
@@ -26,10 +26,7 @@
 
 - 在真实标准用户交互桌面中启动 `rcw-host.exe`，确认控制台显示 `Privilege: standard user`。当前 VM 中的自动化尝试没有稳定产生可观察的标准用户桌面 host 进程；管理员交互桌面运行已经验证。
 
-2026-06-11 的证据保留位置：
-
-- Linux 侧：`/tmp/rcw-v1-full.Qm94Dp`
-- Windows 共享目录日志：`/data/windows-vm/shared/rcw-v1-*`
+2026-06-11 的原始验证日志保留在维护者本机，未纳入公开仓库。需要复核时应重新运行本文档的 E2E 清单并保存新的证据。
 
 ## 必跑本地检查
 
