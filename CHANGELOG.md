@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- 扩展自动发布流水线，覆盖 Linux/macOS/Windows 的 x86-64 和 arm64 目标。
 - 将项目文档重组为长期维护和迭代阶段的结构。
 - 增加标准开源项目入口文件：`LICENSE`、`CONTRIBUTING.md`、`SECURITY.md` 和本变更日志。
 - 将新增文档入口汉化，统一文档语言。

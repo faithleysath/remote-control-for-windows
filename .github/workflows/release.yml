@@ -14,17 +14,167 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
-    env:
-      CARGO_TERM_COLOR: always
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
+          components: clippy
+        with:
           components: rustfmt, clippy
+      - name: Run verification
+        run: |
+          cargo fmt --check
+          cargo test --workspace
+          cargo clippy --workspace -- -D warnings
+
+  build-tools:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            build: cargo
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            build: cargo
+            linux_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            build: cargo
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            build: cargo
+          - target: x86_64-pc-windows-msvc
+            os: ubuntu-latest
+            archive: zip
+            build: xwin
+          - target: aarch64-pc-windows-msvc
+            os: ubuntu-latest
+            archive: zip
+            build: xwin
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install Linux cross linker
+        if: ${{ matrix.linux_cross == true }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+      - name: Install cargo-xwin
+        if: ${{ matrix.build == 'xwin' }}
+        run: cargo install cargo-xwin --locked
+      - name: Run tools clippy
+        run: |
+          if [ "${{ matrix.build }}" = "xwin" ]; then
+            RUSTFLAGS='-C target-feature=+crt-static' cargo xwin clippy --release --target ${{ matrix.target }} -p rcwctl -p rcw-server -- -D warnings
+          else
+            cargo clippy --release --target ${{ matrix.target }} -p rcwctl -p rcw-server -- -D warnings
+          fi
+      - name: Build tools
+        run: |
+          if [ "${{ matrix.build }}" = "xwin" ]; then
+            RUSTFLAGS='-C target-feature=+crt-static' cargo xwin build --release --target ${{ matrix.target }} -p rcwctl -p rcw-server
+          else
+            cargo build --release --target ${{ matrix.target }} -p rcwctl -p rcw-server
+          fi
+      - name: Package tools
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          package="rcw-tools-${target}"
+          exe=""
+          if [[ "$target" == *"windows"* ]]; then
+            exe=".exe"
+          fi
+
+          rm -rf dist
+          mkdir -p "dist/${package}" dist/release
+          cp "target/${target}/release/rcwctl${exe}" "dist/${package}/"
+          cp "target/${target}/release/rcw-server${exe}" "dist/${package}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${package}/"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd dist && python3 -m zipfile -c "release/${package}.zip" "${package}")
+          else
+            tar -C dist -czf "dist/release/${package}.tar.gz" "${package}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rcw-tools-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  build-host:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+      - name: Run host clippy
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo xwin clippy --release --target ${{ matrix.target }} -p rcw-host -- -D warnings
+      - name: Build host
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo xwin build --release --target ${{ matrix.target }} -p rcw-host
+      - name: Package host
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          package="rcw-host-${target}"
+          rm -rf dist
+          mkdir -p "dist/${package}" dist/release
+          cp "target/${target}/release/rcw-host.exe" "dist/${package}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${package}/"
+          (cd dist && python3 -m zipfile -c "release/${package}.zip" "${package}")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rcw-host-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    needs:
+      - build-tools
+      - build-host
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
       - name: Resolve release tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -32,52 +182,16 @@ jobs:
           else
             echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           fi
-      - name: Install Windows target
-        run: rustup target add x86_64-pc-windows-msvc
-      - name: Install cargo-xwin
-        run: cargo install cargo-xwin --locked
-      - name: Run verification
-        run: |
-          cargo fmt --check
-          cargo test --workspace
-          cargo clippy --workspace -- -D warnings
-      - name: Run Windows clippy
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo xwin clippy --release --target x86_64-pc-windows-msvc -p rcw-host -p rcwctl -- -D warnings
-      - name: Build Linux artifacts
-        run: cargo build --release -p rcwctl -p rcw-server
-      - name: Build Windows artifacts
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo xwin build --release --target x86_64-pc-windows-msvc -p rcw-host -p rcwctl
-      - name: Package release artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Generate checksums
         run: |
           set -euo pipefail
-          rm -rf dist
-          mkdir -p dist/release
-
-          mkdir -p dist/rcwctl-x86_64-unknown-linux-gnu
-          cp target/release/rcwctl dist/rcwctl-x86_64-unknown-linux-gnu/
-          cp README.md CHANGELOG.md LICENSE dist/rcwctl-x86_64-unknown-linux-gnu/
-          tar -C dist -czf dist/release/rcwctl-x86_64-unknown-linux-gnu.tar.gz rcwctl-x86_64-unknown-linux-gnu
-
-          mkdir -p dist/rcw-server-x86_64-unknown-linux-gnu
-          cp target/release/rcw-server dist/rcw-server-x86_64-unknown-linux-gnu/
-          cp README.md CHANGELOG.md LICENSE dist/rcw-server-x86_64-unknown-linux-gnu/
-          tar -C dist -czf dist/release/rcw-server-x86_64-unknown-linux-gnu.tar.gz rcw-server-x86_64-unknown-linux-gnu
-
-          mkdir -p dist/rcw-host-x86_64-pc-windows-msvc
-          cp target/x86_64-pc-windows-msvc/release/rcw-host.exe dist/rcw-host-x86_64-pc-windows-msvc/
-          cp README.md CHANGELOG.md LICENSE dist/rcw-host-x86_64-pc-windows-msvc/
-          (cd dist && python3 -m zipfile -c release/rcw-host-x86_64-pc-windows-msvc.zip rcw-host-x86_64-pc-windows-msvc)
-
-          mkdir -p dist/rcwctl-x86_64-pc-windows-msvc
-          cp target/x86_64-pc-windows-msvc/release/rcwctl.exe dist/rcwctl-x86_64-pc-windows-msvc/
-          cp README.md CHANGELOG.md LICENSE dist/rcwctl-x86_64-pc-windows-msvc/
-          (cd dist && python3 -m zipfile -c release/rcwctl-x86_64-pc-windows-msvc.zip rcwctl-x86_64-pc-windows-msvc)
-
-          (cd dist/release && sha256sum *.tar.gz *.zip > checksums.txt)
+          cd dist/release
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
       - name: Create GitHub release
         run: |
           set -euo pipefail

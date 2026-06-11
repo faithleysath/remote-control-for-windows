@@ -46,7 +46,20 @@ git push origin v0.1.0
 6. 确认发布产物不需要任何 secret 或本地配置文件。
 7. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
 
-## 构建命令
+## 目标平台
+
+自动发布目标：
+
+- Linux x86-64：`x86_64-unknown-linux-gnu`
+- Linux arm64：`aarch64-unknown-linux-gnu`
+- macOS x86-64：`x86_64-apple-darwin`
+- macOS arm64：`aarch64-apple-darwin`
+- Windows x86-64：`x86_64-pc-windows-msvc`
+- Windows arm64：`aarch64-pc-windows-msvc`
+
+`rcwctl` 和 `rcw-server` 会发布到上述全部目标。`rcw-host.exe` 只发布 Windows x86-64 和 Windows arm64。
+
+## 本地构建命令
 
 Linux controller 和 server：
 
@@ -75,14 +88,18 @@ target/x86_64-pc-windows-msvc/release/rcw-host.exe
 
 ```text
 GitHub Release assets:
+  rcw-tools-x86_64-unknown-linux-gnu.tar.gz
+  rcw-tools-aarch64-unknown-linux-gnu.tar.gz
+  rcw-tools-x86_64-apple-darwin.tar.gz
+  rcw-tools-aarch64-apple-darwin.tar.gz
+  rcw-tools-x86_64-pc-windows-msvc.zip
+  rcw-tools-aarch64-pc-windows-msvc.zip
   rcw-host-x86_64-pc-windows-msvc.zip
-  rcwctl-x86_64-unknown-linux-gnu.tar.gz
-  rcwctl-x86_64-pc-windows-msvc.zip
-  rcw-server-x86_64-unknown-linux-gnu.tar.gz
+  rcw-host-aarch64-pc-windows-msvc.zip
   checksums.txt
 ```
 
-`checksums.txt` 使用 SHA-256，包含所有发布包。
+`rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。
 
 ## Windows Host 验证
 
