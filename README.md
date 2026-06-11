@@ -81,11 +81,19 @@ rcwctl close
 
 ## 当前状态
 
-当前仓库已经创建 Rust workspace 和 v1 主链路实现：
+当前仓库已经创建 Rust workspace，完成 v1 主链路实现，并完成本地与 Windows VM 实机验证：
 
 - `rcw-common`：协议、配置、ID/session token、TOTP、审计 JSONL 和 SHA-256 工具。
 - `rcw-server`：`/healthz`、`/ws/host`、`/ws/control`、控制端 token 校验、TOTP 转发认证、内存 session、status/close、命令和 binary frame 中继、WebSocket ping 心跳、基础限流。
 - `rcw-host`：被控端连接、断线重连、机器 ID/TOTP 显示、剪贴板刷新、会话认证、流式命令输出、`upload.begin`/`download.begin` 分块文件传输、截图 binary chunk 返回、审计日志和 Win32 API 平台操作入口。
 - `rcwctl`：`open/status/exec/upload/download/screenshot/windows/move/click/scroll/type/key/close`，会话文件复用、JSON 输出和控制端审计。
 
-`ba8baad` 提交时曾在 Linux 开发环境验证 `cargo check`、`cargo test`、`cargo clippy` 和本地 server + host + rcwctl 烟测。后续补齐协议命名、binary 分块、流式输出、重连、心跳、限流和 Win32 API 平台层后，按要求尚未执行验证、测试、Windows E2E 或交叉编译。
+截至 2026-06-11，已验证：
+
+- Linux 本地：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`、本地 server + host + rcwctl smoke。
+- Linux 到 Windows MSVC 交叉编译：`RUSTFLAGS='-C target-feature=+crt-static' cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release`，产物为 x86-64 Windows console PE，未依赖 `VCRUNTIME140.dll`。
+- Windows VM 实机：`open/status/close`、错误 token/TOTP/TOTP period、命令执行、命令超时和子进程清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘输入/按键、剪贴板内容边界、电源防休眠/熄屏请求、session close 后旧 session 失效、server/host 审计。
+
+仍需补充的验收项：
+
+- 在真实标准用户桌面中启动 `rcw-host.exe`，确认控制台显示 `Privilege: standard user`。当前 Windows VM 中已验证管理员 elevated 显示；自动化尝试创建临时标准用户运行 host 未能稳定启动到可观测桌面。

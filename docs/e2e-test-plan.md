@@ -4,6 +4,35 @@
 
 证明 v1 的真实远控闭环可用：Windows 被控端连接本机服务端，Linux/macOS 控制端 CLI 能通过服务器完成认证、命令、文件、截图、窗口、鼠标键盘和审计验证。
 
+## 最近实机验证记录
+
+2026-06-11 在本机 `/data/windows-vm` 的 Windows-in-Docker VM 上完成 v1 实机验证。Windows 被控端使用本机 Linux 交叉编译出的 `rcw-host.exe`，控制端和服务端运行在 Linux 主机。
+
+已通过：
+
+- Windows host 启动、连接 server、显示 machine ID/TOTP、复制剪贴板、显示管理员 elevated 状态。
+- `rcwctl open/status/close` 正向会话。
+- 错误 control token、错误 TOTP、TOTP 周期不一致均返回预期错误。
+- Windows 命令执行成功。
+- 远端命令超时返回 `RequestTimeout`，并确认被测 `pwsh` 进程无残留。
+- 上传/下载文件 SHA-256 一致。
+- `windows` 返回可见窗口列表。
+- 交互桌面下 `screenshot` 生成 1280x720 PNG。
+- `move`、`click`、`scroll`、`type`、`key` 均执行成功，并用 Notepad 截图确认文字实际输入。
+- 剪贴板内容只包含服务器、机器 ID、验证码、有效期；未包含 control token、session token、TOTP seed 或原始机器标识。
+- `powercfg /requests` 显示 `rcw-host.exe` 持有 `DISPLAY` 和 `SYSTEM` 请求；临时把 AC 显示/睡眠超时设为 60 秒并等待 75 秒后，session 仍 active，命令仍可执行；测试后已恢复原值。
+- `rcwctl close` 后，把旧 session 文件放回再请求 `status`，返回 `SessionExpired`。
+- server 和 host 审计日志均写入 request ID 相关事件。
+
+未闭合：
+
+- 普通标准用户桌面启动 `rcw-host.exe` 后显示 `Privilege: standard user` 尚未完成实机确认。当前 VM 中管理员交互任务即使不显式请求 highest 仍显示 elevated；临时标准用户的非交互自动化启动未能稳定产生可观测 host 日志。该项需要登录标准用户桌面后手工或通过可交互通道启动 host 再验证。
+
+证据位置：
+
+- Linux 侧测试产物：`/tmp/rcw-v1-full.Qm94Dp`
+- Windows 共享目录日志：`/data/windows-vm/shared/rcw-v1-*`
+
 ## 测试环境
 
 真实 E2E 环境：

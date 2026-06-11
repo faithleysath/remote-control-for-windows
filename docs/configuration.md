@@ -85,15 +85,25 @@ rcw-server
 
 ## Windows 被控端构建
 
-Linux 交叉编译 Windows 可作为后续目标；首版可以先在 Windows 或 Windows builder 上构建。
+当前 Linux 开发机可以通过 `cargo-xwin` 交叉编译 Windows MSVC 目标，不需要在目标 Windows 机器上安装 Rust。
 
-推荐目标：
+推荐构建命令：
 
 ```bash
-cargo build --release -p rcw-host --target x86_64-pc-windows-msvc
+rustup target add x86_64-pc-windows-msvc
+RUSTFLAGS='-C target-feature=+crt-static' \
+  cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
-如果依赖 Win32 API，优先使用 MSVC target。
+产物路径：
+
+```text
+target/x86_64-pc-windows-msvc/release/rcw-host.exe
+```
+
+使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的实机测试产物为 x86-64 Windows console PE，已在 `/data/windows-vm` 的 Windows VM 中运行通过。
+
+如果在其他机器上无法使用 `cargo-xwin`，可以改在 Windows builder 上执行同等 release 构建，并记录构建命令和 SHA-256。
 
 ## 服务端部署
 
