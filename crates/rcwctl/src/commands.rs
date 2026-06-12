@@ -2,12 +2,9 @@ use std::{fs, path::Path, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use rcw_common::{
-    config,
     protocol::{
-        ControlOpenPayload, ControlOpenResultPayload, ExecArgs, ScreenshotArgs,
-        SessionClosePayload, SessionCloseResultPayload, SessionStatusPayload,
-        SessionStatusResultPayload, UploadArgs, WindowInfo, WireMessage, COMMAND_EXEC,
-        COMMAND_SCREENSHOT, COMMAND_WINDOWS, PROTOCOL_VERSION, TYPE_CONTROL_OPEN,
+        ExecArgs, ScreenshotArgs, UploadArgs, WindowInfo, COMMAND_EXEC, COMMAND_SCREENSHOT,
+        COMMAND_WINDOWS,
     },
     transfer::{commit_temp_output_file, create_temp_output_file, sha256_file, temp_output_path},
 };
@@ -20,10 +17,7 @@ use crate::{
     controller_config::{config_wait_timeout, ControllerConfig},
     output::{print_json, write_output_file},
     session::{FileSessionStore, SessionFile, SessionStore},
-    transport::{
-        last_payload, send_and_collect, send_command, send_command_download_to_file,
-        send_command_with_upload_file,
-    },
+    transport::ControlClient,
 };
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -152,35 +146,25 @@ pub(crate) async fn open_session_state(
     totp: &str,
     explicit_period: Option<u64>,
 ) -> Result<OpenSessionResult> {
-    let server = config::resolve_server_url(config.server.as_deref())?;
-    let token = config::control_token(config.token.as_deref())?;
-    let period = config::resolve_totp_period_seconds(explicit_period)?;
-    let message = WireMessage::new(
-        TYPE_CONTROL_OPEN,
-        Some(request_id.to_owned()),
-        None,
-        ControlOpenPayload {
-            protocol_version: PROTOCOL_VERSION,
-            control_token: token,
-            machine_id: machine_id.to_owned(),
-            totp: totp.to_owned(),
-            totp_period_seconds: period,
-        },
-    )?;
-    let messages = send_and_collect(
-        &server,
-        message,
-        &[rcw_common::protocol::TYPE_CONTROL_OPEN_RESULT],
-        config_wait_timeout(config)?,
-    )
-    .await?;
-    let result: ControlOpenResultPayload = last_payload(&messages)?;
+    let opened = ControlClient::new(config, store)
+        .open_session(
+            request_id,
+            machine_id,
+            totp,
+            explicit_period,
+            config_wait_timeout(config)?,
+        )
+        .await?;
+    let server = opened.server.clone();
+    let session_id = opened.session_id.clone();
+    let opened_machine_id = opened.machine_id.clone();
+    let session_token = opened.session_token;
     let now = rcw_common::audit::now_rfc3339();
     let session = SessionFile {
         server: server.clone(),
-        machine_id: result.machine_id.clone(),
-        session_id: result.session_id.clone(),
-        session_token: result.session_token,
+        machine_id: opened_machine_id.clone(),
+        session_id: session_id.clone(),
+        session_token,
         created_at: now.clone(),
         last_used_at: now,
     };
@@ -188,8 +172,8 @@ pub(crate) async fn open_session_state(
 
     Ok(OpenSessionResult {
         ok: true,
-        session_id: result.session_id,
-        machine_id: result.machine_id,
+        session_id,
+        machine_id: opened_machine_id,
         server,
         request_id: request_id.to_owned(),
     })
@@ -222,24 +206,9 @@ pub(crate) async fn status_session_state(
     store: &dyn SessionStore,
     request_id: &str,
 ) -> Result<StatusResult> {
-    let session = store.read_session()?;
-    let message = WireMessage::new(
-        rcw_common::protocol::TYPE_SESSION_STATUS,
-        Some(request_id.to_owned()),
-        Some(session.session_id.clone()),
-        SessionStatusPayload {
-            session_token: session.session_token.clone(),
-        },
-    )?;
-    let messages = send_and_collect(
-        &session.server,
-        message,
-        &[rcw_common::protocol::TYPE_SESSION_STATUS_RESULT],
-        config_wait_timeout(config)?,
-    )
-    .await?;
-    let result: SessionStatusResultPayload = last_payload(&messages)?;
-    store.touch_session(session)?;
+    let result = ControlClient::new(config, store)
+        .status(request_id, config_wait_timeout(config)?)
+        .await?;
 
     Ok(StatusResult {
         ok: result.ok,
@@ -269,24 +238,9 @@ pub(crate) async fn close_session_state(
     store: &dyn SessionStore,
     request_id: &str,
 ) -> Result<CloseResult> {
-    let session = store.read_session()?;
-    let message = WireMessage::new(
-        rcw_common::protocol::TYPE_SESSION_CLOSE,
-        Some(request_id.to_owned()),
-        Some(session.session_id.clone()),
-        SessionClosePayload {
-            session_token: session.session_token.clone(),
-        },
-    )?;
-    let messages = send_and_collect(
-        &session.server,
-        message,
-        &[rcw_common::protocol::TYPE_SESSION_CLOSE_RESULT],
-        config_wait_timeout(config)?,
-    )
-    .await?;
-    let result: SessionCloseResultPayload = last_payload(&messages)?;
-    store.remove_session()?;
+    let result = ControlClient::new(config, store)
+        .close_session(request_id, config_wait_timeout(config)?)
+        .await?;
 
     Ok(CloseResult {
         ok: result.ok,
@@ -322,20 +276,19 @@ pub(crate) async fn exec_command_state(
     }
     let wait = config_wait_timeout(config)?;
     let remote_timeout_ms = wait.as_millis().min(u64::MAX as u128) as u64;
-    let response = send_command(
-        config,
-        store,
-        request_id,
-        COMMAND_EXEC,
-        json!(ExecArgs {
-            program: command[0].clone(),
-            argv: command[1..].to_vec(),
-            cwd,
-            timeout_ms: remote_timeout_ms,
-        }),
-        wait + Duration::from_secs(10),
-    )
-    .await?;
+    let response = ControlClient::new(config, store)
+        .command(
+            request_id,
+            COMMAND_EXEC,
+            json!(ExecArgs {
+                program: command[0].clone(),
+                argv: command[1..].to_vec(),
+                cwd,
+                timeout_ms: remote_timeout_ms,
+            }),
+            wait + Duration::from_secs(10),
+        )
+        .await?;
     let complete = response.complete.context("missing command.complete")?;
     Ok(ExecResult {
         ok: complete.ok,
@@ -395,20 +348,19 @@ pub(crate) async fn upload_path_state(
             bail!("local sha256 mismatch: expected {expected}, calculated {actual}");
         }
     }
-    let response = send_command_with_upload_file(
-        config,
-        store,
-        request_id,
-        local,
-        UploadArgs {
-            remote_path: remote.to_owned(),
-            overwrite,
-            sha256: actual.clone(),
-            size,
-        },
-        config_wait_timeout(config)?,
-    )
-    .await?;
+    let response = ControlClient::new(config, store)
+        .upload_file(
+            request_id,
+            local,
+            UploadArgs {
+                remote_path: remote.to_owned(),
+                overwrite,
+                sha256: actual.clone(),
+                size,
+            },
+            config_wait_timeout(config)?,
+        )
+        .await?;
     let complete = response.complete.context("missing command.complete")?;
     Ok(UploadResult {
         ok: complete.ok,
@@ -474,15 +426,9 @@ pub(crate) async fn download_file_state(
     let result = async {
         let output =
             tokio::fs::File::from_std(create_temp_output_file(local, &temp_path, overwrite)?);
-        let response = send_command_download_to_file(
-            config,
-            store,
-            request_id,
-            remote,
-            output,
-            config_wait_timeout(config)?,
-        )
-        .await?;
+        let response = ControlClient::new(config, store)
+            .download_to_file(request_id, remote, output, config_wait_timeout(config)?)
+            .await?;
         if let Some(expected) = response.complete.size {
             if response.bytes_written != expected {
                 bail!(
@@ -555,18 +501,17 @@ pub(crate) async fn screenshot_state(
     display: Option<u32>,
     format: &str,
 ) -> Result<ScreenshotResult> {
-    let response = send_command(
-        config,
-        store,
-        request_id,
-        COMMAND_SCREENSHOT,
-        json!(ScreenshotArgs {
-            display,
-            format: format.to_owned(),
-        }),
-        config_wait_timeout(config)?,
-    )
-    .await?;
+    let response = ControlClient::new(config, store)
+        .command(
+            request_id,
+            COMMAND_SCREENSHOT,
+            json!(ScreenshotArgs {
+                display,
+                format: format.to_owned(),
+            }),
+            config_wait_timeout(config)?,
+        )
+        .await?;
     let complete = response.complete.context("missing command.complete")?;
     Ok(ScreenshotResult {
         ok: complete.ok,
@@ -602,15 +547,14 @@ pub(crate) async fn windows_state(
     store: &dyn SessionStore,
     request_id: &str,
 ) -> Result<WindowsResult> {
-    let response = send_command(
-        config,
-        store,
-        request_id,
-        COMMAND_WINDOWS,
-        json!({}),
-        config_wait_timeout(config)?,
-    )
-    .await?;
+    let response = ControlClient::new(config, store)
+        .command(
+            request_id,
+            COMMAND_WINDOWS,
+            json!({}),
+            config_wait_timeout(config)?,
+        )
+        .await?;
     let complete = response.complete.context("missing command.complete")?;
     let windows: Value = serde_json::from_str(&response.json_stream)?;
     Ok(WindowsResult {
@@ -648,15 +592,9 @@ pub(crate) async fn simple_command_state(
     command: &str,
     args: Value,
 ) -> Result<SimpleResult> {
-    let response = send_command(
-        config,
-        store,
-        request_id,
-        command,
-        args,
-        config_wait_timeout(config)?,
-    )
-    .await?;
+    let response = ControlClient::new(config, store)
+        .command(request_id, command, args, config_wait_timeout(config)?)
+        .await?;
     let complete = response.complete.context("missing command.complete")?;
     Ok(SimpleResult {
         ok: complete.ok,
