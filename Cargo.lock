@@ -1199,7 +1199,6 @@ name = "rcw-host"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "base64",
  "clap",
  "futures-util",
  "hostname",
