@@ -57,6 +57,69 @@ pub(crate) enum IncomingFrame {
     Binary(Vec<u8>),
 }
 
+struct DownloadReceiver {
+    request_id: String,
+    hasher: Sha256Accumulator,
+    bytes_written: u64,
+}
+
+impl DownloadReceiver {
+    fn new(request_id: &str) -> Self {
+        Self {
+            request_id: request_id.to_owned(),
+            hasher: Sha256Accumulator::new(),
+            bytes_written: 0,
+        }
+    }
+
+    async fn accept_binary_frame(
+        &mut self,
+        bytes: &[u8],
+        output: &mut tokio::fs::File,
+    ) -> Result<()> {
+        let frame = BinaryFrame::decode(bytes)?;
+        if frame.request_id != self.request_id {
+            bail!(
+                "download binary frame request_id mismatch: expected {}, got {}",
+                self.request_id,
+                frame.request_id
+            );
+        }
+        if frame.kind != BinaryKind::DownloadChunk {
+            return Ok(());
+        }
+        output.write_all(&frame.payload).await?;
+        self.hasher.update(&frame.payload);
+        self.bytes_written += frame.payload.len() as u64;
+        Ok(())
+    }
+
+    fn finish(self, complete: CommandCompletePayload) -> DownloadStreamResponse {
+        DownloadStreamResponse {
+            complete,
+            bytes_written: self.bytes_written,
+            sha256: self.hasher.finalize(),
+        }
+    }
+}
+
+enum UploadSendOutcome {
+    Sent(Vec<IncomingFrame>),
+    Terminal(Vec<IncomingFrame>),
+}
+
+impl UploadSendOutcome {
+    fn into_messages(self) -> Vec<IncomingFrame> {
+        match self {
+            Self::Sent(messages) | Self::Terminal(messages) => messages,
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Terminal(_))
+    }
+}
+
 pub(crate) struct OpenedSession {
     pub(crate) server: String,
     pub(crate) machine_id: String,
@@ -220,32 +283,19 @@ impl<'a> ControlClient<'a> {
         )?;
         let (mut sink, mut stream) = connect_control(&session.server).await?;
         send_json(&mut sink, message).await?;
-        let mut messages = Vec::new();
-        {
-            let mut send_file = Box::pin(send_file_binary_chunks(
-                &mut sink,
-                request_id,
-                BinaryKind::UploadChunk,
-                local,
-                size,
-            ));
-            loop {
-                tokio::select! {
-                    result = &mut send_file => {
-                        result?;
-                        break;
-                    }
-                    frame = next_message_unbounded(&mut stream) => {
-                        let frame = frame?;
-                        let terminal = is_terminal_frame(&frame, &[TYPE_UPLOAD_COMPLETE])?;
-                        messages.push(frame);
-                        if terminal {
-                            self.store.touch_session(session)?;
-                            return command_response(messages);
-                        }
-                    }
-                }
-            }
+        let outcome = send_upload_chunks_collecting_responses(
+            &mut sink,
+            &mut stream,
+            request_id,
+            local,
+            size,
+        )
+        .await?;
+        let terminal = outcome.is_terminal();
+        let mut messages = outcome.into_messages();
+        if terminal {
+            self.store.touch_session(session)?;
+            return command_response(messages);
         }
         messages.extend(collect_until_terminal(&mut stream, &[TYPE_UPLOAD_COMPLETE], wait).await?);
         self.store.touch_session(session)?;
@@ -277,8 +327,7 @@ impl<'a> ControlClient<'a> {
         let (mut sink, mut stream) = connect_control(&session.server).await?;
         send_json(&mut sink, message).await?;
 
-        let mut hasher = Sha256Accumulator::new();
-        let mut bytes_written = 0_u64;
+        let mut receiver = DownloadReceiver::new(request_id);
         loop {
             let frame = next_message(&mut stream, wait).await?;
             match frame {
@@ -292,26 +341,11 @@ impl<'a> ControlClient<'a> {
                         output.sync_all().await?;
                         drop(output);
                         self.store.touch_session(session)?;
-                        return Ok(DownloadStreamResponse {
-                            complete: message.payload_as()?,
-                            bytes_written,
-                            sha256: hasher.finalize(),
-                        });
+                        return Ok(receiver.finish(message.payload_as()?));
                     }
                 }
                 IncomingFrame::Binary(bytes) => {
-                    let frame = BinaryFrame::decode(&bytes)?;
-                    if frame.request_id != request_id {
-                        bail!(
-                            "download binary frame request_id mismatch: expected {request_id}, got {}",
-                            frame.request_id
-                        );
-                    }
-                    if frame.kind == BinaryKind::DownloadChunk {
-                        output.write_all(&frame.payload).await?;
-                        hasher.update(&frame.payload);
-                        bytes_written += frame.payload.len() as u64;
-                    }
+                    receiver.accept_binary_frame(&bytes, &mut output).await?;
                 }
             }
         }
@@ -355,6 +389,39 @@ fn is_terminal_frame(frame: &IncomingFrame, terminal_kinds: &[&str]) -> Result<b
             Ok(terminal_kinds.iter().any(|kind| *kind == message.kind))
         }
         IncomingFrame::Binary(_) => Ok(false),
+    }
+}
+
+async fn send_upload_chunks_collecting_responses(
+    sink: &mut WsSink,
+    stream: &mut WsStream,
+    request_id: &str,
+    local: &Path,
+    size: u64,
+) -> Result<UploadSendOutcome> {
+    let mut messages = Vec::new();
+    let mut send_file = Box::pin(send_file_binary_chunks(
+        sink,
+        request_id,
+        BinaryKind::UploadChunk,
+        local,
+        size,
+    ));
+    loop {
+        tokio::select! {
+            result = &mut send_file => {
+                result?;
+                return Ok(UploadSendOutcome::Sent(messages));
+            }
+            frame = next_message_during_upload_send(stream) => {
+                let frame = frame?;
+                let terminal = is_terminal_frame(&frame, &[TYPE_UPLOAD_COMPLETE])?;
+                messages.push(frame);
+                if terminal {
+                    return Ok(UploadSendOutcome::Terminal(messages));
+                }
+            }
+        }
     }
 }
 
@@ -419,7 +486,7 @@ async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
     Ok(())
 }
 
-async fn next_message_unbounded(stream: &mut WsStream) -> Result<IncomingFrame> {
+async fn next_message_during_upload_send(stream: &mut WsStream) -> Result<IncomingFrame> {
     loop {
         let frame = stream
             .next()
