@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
@@ -43,8 +43,9 @@ use tokio::{
 use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+const OUTBOUND_QUEUE_CAPACITY: usize = 128;
 
-type Tx = mpsc::UnboundedSender<Outbound>;
+type Tx = mpsc::Sender<Outbound>;
 
 enum Outbound {
     Text(WireMessage),
@@ -90,6 +91,227 @@ struct PendingOpen {
     controller_label: String,
 }
 
+impl ServerState {
+    fn new() -> Self {
+        Self {
+            hosts: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            pending_open: Mutex::new(HashMap::new()),
+            request_routes: Mutex::new(HashMap::new()),
+            request_controllers: Mutex::new(HashMap::new()),
+            host_registrations: Mutex::new(HashMap::new()),
+            auth_attempts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn register_host(&self, machine_id: String, tx: Tx, totp_period_seconds: u64) {
+        let mut hosts = self.hosts.lock().await;
+        hosts.insert(
+            machine_id,
+            HostConn {
+                tx,
+                totp_period_seconds,
+            },
+        );
+    }
+
+    async fn host(&self, machine_id: &str) -> Option<HostConn> {
+        let hosts = self.hosts.lock().await;
+        hosts.get(machine_id).cloned()
+    }
+
+    async fn host_tx(&self, machine_id: &str) -> Option<Tx> {
+        self.host(machine_id).await.map(|host| host.tx)
+    }
+
+    async fn host_has_active_session(&self, machine_id: &str) -> bool {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .values()
+            .any(|session| session.machine_id == machine_id)
+    }
+
+    async fn insert_pending_open(&self, request_id: String, pending: PendingOpen) {
+        let mut pending_open = self.pending_open.lock().await;
+        pending_open.insert(request_id, pending);
+    }
+
+    async fn take_pending_open(&self, request_id: &str) -> Option<PendingOpen> {
+        let mut pending_open = self.pending_open.lock().await;
+        pending_open.remove(request_id)
+    }
+
+    async fn remove_pending_open(&self, request_id: &str) {
+        let mut pending_open = self.pending_open.lock().await;
+        pending_open.remove(request_id);
+    }
+
+    async fn create_session(
+        &self,
+        session_id: String,
+        session_token: String,
+        machine_id: String,
+        controller_tx: Tx,
+    ) {
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(
+            session_id.clone(),
+            SessionState {
+                session_id,
+                session_token,
+                machine_id,
+                controller_tx: Some(controller_tx),
+                last_seen: rcw_common::audit::now_rfc3339(),
+            },
+        );
+    }
+
+    async fn session_if_valid(
+        &self,
+        session_id: &str,
+        session_token: &str,
+    ) -> Option<SessionState> {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .filter(|session| session.session_token == session_token)
+            .cloned()
+    }
+
+    async fn remove_session_if_valid(
+        &self,
+        session_id: &str,
+        session_token: &str,
+    ) -> Option<SessionState> {
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get(session_id) {
+            Some(session) if session.session_token == session_token => sessions.remove(session_id),
+            _ => None,
+        }
+    }
+
+    async fn bind_controller_to_session(
+        &self,
+        session_id: &str,
+        session_token: &str,
+        controller_tx: Tx,
+    ) -> Option<SessionState> {
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get_mut(session_id) {
+            Some(session) if session.session_token == session_token => {
+                session.controller_tx = Some(controller_tx);
+                session.last_seen = rcw_common::audit::now_rfc3339();
+                Some(session.clone())
+            }
+            _ => None,
+        }
+    }
+
+    async fn track_request_route(&self, request_id: String, session_id: String, tx: Tx) {
+        let mut routes = self.request_routes.lock().await;
+        routes.insert(request_id.clone(), session_id);
+        drop(routes);
+
+        let mut controllers = self.request_controllers.lock().await;
+        controllers.insert(request_id, tx);
+    }
+
+    async fn clear_request_route(&self, request_id: &str) {
+        let mut routes = self.request_routes.lock().await;
+        routes.remove(request_id);
+        drop(routes);
+
+        let mut controllers = self.request_controllers.lock().await;
+        controllers.remove(request_id);
+    }
+
+    async fn request_session_id(&self, request_id: &str) -> Option<String> {
+        let routes = self.request_routes.lock().await;
+        routes.get(request_id).cloned()
+    }
+
+    async fn controller_for_request(&self, request_id: &str) -> Option<Tx> {
+        let controllers = self.request_controllers.lock().await;
+        controllers.get(request_id).cloned()
+    }
+
+    async fn session_controller_for_machine(
+        &self,
+        session_id: &str,
+        machine_id: &str,
+    ) -> Option<Tx> {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .get(session_id)
+            .filter(|session| session.machine_id == machine_id)
+            .and_then(|session| session.controller_tx.clone())
+    }
+
+    async fn command_route(&self, session_id: &str) -> Option<(String, String)> {
+        let sessions = self.sessions.lock().await;
+        let session = sessions.get(session_id)?;
+        Some((session.machine_id.clone(), session.session_id.clone()))
+    }
+
+    async fn unregister_host(&self, machine_id: &str) -> Vec<SessionState> {
+        let mut hosts = self.hosts.lock().await;
+        hosts.remove(machine_id);
+        drop(hosts);
+
+        let removed_sessions = {
+            let mut sessions = self.sessions.lock().await;
+            let session_ids = sessions
+                .values()
+                .filter(|session| session.machine_id == machine_id)
+                .map(|session| session.session_id.clone())
+                .collect::<Vec<_>>();
+            session_ids
+                .into_iter()
+                .filter_map(|session_id| sessions.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+
+        let removed_session_ids = removed_sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect::<HashSet<_>>();
+        let removed_request_ids = {
+            let mut routes = self.request_routes.lock().await;
+            let request_ids = routes
+                .iter()
+                .filter(|(_, session_id)| removed_session_ids.contains(*session_id))
+                .map(|(request_id, _)| request_id.clone())
+                .collect::<Vec<_>>();
+            for request_id in &request_ids {
+                routes.remove(request_id);
+            }
+            request_ids
+        };
+        if !removed_request_ids.is_empty() {
+            let mut controllers = self.request_controllers.lock().await;
+            for request_id in removed_request_ids {
+                controllers.remove(&request_id);
+            }
+        }
+
+        removed_sessions
+    }
+
+    async fn allow_host_registration(&self, machine_id: &str) -> bool {
+        allow_rate_limit(
+            &self.host_registrations,
+            machine_id,
+            20,
+            Duration::from_secs(60),
+        )
+        .await
+    }
+
+    async fn allow_auth_attempt(&self, machine_id: &str) -> bool {
+        allow_rate_limit(&self.auth_attempts, machine_id, 12, Duration::from_secs(60)).await
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_filter = std::env::var("RCW_LOG").unwrap_or_else(|_| "info".to_owned());
@@ -106,15 +328,7 @@ async fn main() -> Result<()> {
     let audit_path = PathBuf::from(config::server_audit_log_path());
 
     let state = AppState {
-        inner: Arc::new(ServerState {
-            hosts: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            pending_open: Mutex::new(HashMap::new()),
-            request_routes: Mutex::new(HashMap::new()),
-            request_controllers: Mutex::new(HashMap::new()),
-            host_registrations: Mutex::new(HashMap::new()),
-            auth_attempts: Mutex::new(HashMap::new()),
-        }),
+        inner: Arc::new(ServerState::new()),
         control_token: Arc::new(control_token),
         audit_path: Arc::new(audit_path),
     };
@@ -145,6 +359,54 @@ async fn host_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl In
 
 async fn control_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_control_socket(socket, state))
+}
+
+fn outbound_channel() -> (Tx, mpsc::Receiver<Outbound>) {
+    mpsc::channel(OUTBOUND_QUEUE_CAPACITY)
+}
+
+fn spawn_writer(
+    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    mut rx: mpsc::Receiver<Outbound>,
+    peer: &'static str,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
+        loop {
+            tokio::select! {
+                maybe = rx.recv() => {
+                    let Some(message) = maybe else {
+                        break;
+                    };
+                    let message = match outbound_to_ws_message(message, peer) {
+                        Some(message) => message,
+                        None => continue,
+                    };
+                    if sender.send(message).await.is_err() {
+                        break;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if sender.send(Message::Ping(Vec::new())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn outbound_to_ws_message(outbound: Outbound, peer: &str) -> Option<Message> {
+    match outbound {
+        Outbound::Text(message) => match serde_json::to_string(&message) {
+            Ok(text) => Some(Message::Text(text)),
+            Err(err) => {
+                warn!("failed to serialize outbound {peer} message: {err}");
+                None
+            }
+        },
+        Outbound::Binary(bytes) => Some(Message::Binary(bytes)),
+    }
 }
 
 async fn handle_host_socket(socket: WebSocket, state: AppState) {
@@ -199,14 +461,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
-    if !allow_rate_limit(
-        &state.inner.host_registrations,
-        &hello.machine_id,
-        20,
-        Duration::from_secs(60),
-    )
-    .await
-    {
+    if !state.inner.allow_host_registration(&hello.machine_id).await {
         let error = make_error(
             hello_msg.request_id.clone(),
             None,
@@ -221,50 +476,17 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
-    let writer = tokio::spawn(async move {
-        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
-        loop {
-            tokio::select! {
-            maybe = rx.recv() => {
-                let Some(message) = maybe else {
-                    break;
-                };
-                match message {
-                    Outbound::Text(message) => match serde_json::to_string(&message) {
-                        Ok(text) => {
-                            if sender.send(Message::Text(text)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(err) => warn!("failed to serialize outbound host message: {err}"),
-                    },
-                    Outbound::Binary(bytes) => {
-                        if sender.send(Message::Binary(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            _ = heartbeat.tick() => {
-                if sender.send(Message::Ping(Vec::new())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let (tx, rx) = outbound_channel();
+    let writer = spawn_writer(sender, rx, "host");
 
-    {
-        let mut hosts = state.inner.hosts.lock().await;
-        hosts.insert(
+    state
+        .inner
+        .register_host(
             hello.machine_id.clone(),
-            HostConn {
-                tx: tx.clone(),
-                totp_period_seconds: hello.totp_period_seconds,
-            },
-        );
-    }
+            tx.clone(),
+            hello.totp_period_seconds,
+        )
+        .await;
 
     audit(
         &state,
@@ -337,10 +559,7 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
             return;
         }
     };
-    let pending = {
-        let mut pending = state.inner.pending_open.lock().await;
-        pending.remove(&request_id)
-    };
+    let pending = state.inner.take_pending_open(&request_id).await;
 
     let Some(pending) = pending else {
         warn!("host auth result for unknown request {request_id}");
@@ -383,20 +602,15 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
 
     let session_id = new_session_id();
     let session_token = new_session_token();
-    let now = rcw_common::audit::now_rfc3339();
-    {
-        let mut sessions = state.inner.sessions.lock().await;
-        sessions.insert(
+    state
+        .inner
+        .create_session(
             session_id.clone(),
-            SessionState {
-                session_id: session_id.clone(),
-                session_token: session_token.clone(),
-                machine_id: machine_id.to_owned(),
-                controller_tx: Some(pending.controller_tx.clone()),
-                last_seen: now,
-            },
-        );
-    }
+            session_token.clone(),
+            machine_id.to_owned(),
+            pending.controller_tx.clone(),
+        )
+        .await;
 
     let result = WireMessage::new(
         TYPE_CONTROL_OPEN_RESULT,
@@ -412,7 +626,7 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
     .expect("open result serializes");
     send_text(&pending.controller_tx, result);
 
-    if let Some(host_tx) = host_tx(state, machine_id).await {
+    if let Some(host_tx) = state.inner.host_tx(machine_id).await {
         let opened = WireMessage::new(
             TYPE_HOST_SESSION_OPENED,
             Some(request_id.clone()),
@@ -449,17 +663,15 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
         return;
     };
     let mut controller_tx = if let Some(request_id) = &request_id {
-        let controllers = state.inner.request_controllers.lock().await;
-        controllers.get(request_id).cloned()
+        state.inner.controller_for_request(request_id).await
     } else {
         None
     };
     if controller_tx.is_none() {
-        let sessions = state.inner.sessions.lock().await;
-        controller_tx = sessions
-            .get(&session_id)
-            .filter(|session| session.machine_id == machine_id)
-            .and_then(|session| session.controller_tx.clone());
+        controller_tx = state
+            .inner
+            .session_controller_for_machine(&session_id, machine_id)
+            .await;
     }
     debug!(
         kind = %message.kind,
@@ -475,10 +687,7 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
     };
     if is_terminal {
         if let Some(request_id) = request_id {
-            let mut routes = state.inner.request_routes.lock().await;
-            routes.remove(&request_id);
-            let mut controllers = state.inner.request_controllers.lock().await;
-            controllers.remove(&request_id);
+            state.inner.clear_request_route(&request_id).await;
         }
     }
 }
@@ -491,10 +700,7 @@ async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: V
             return;
         }
     };
-    let session_id = {
-        let routes = state.inner.request_routes.lock().await;
-        routes.get(&frame.request_id).cloned()
-    };
+    let session_id = state.inner.request_session_id(&frame.request_id).await;
     let Some(session_id) = session_id else {
         warn!(
             "host binary frame for unknown request {} from {}",
@@ -502,16 +708,12 @@ async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: V
         );
         return;
     };
-    let mut controller_tx = {
-        let controllers = state.inner.request_controllers.lock().await;
-        controllers.get(&frame.request_id).cloned()
-    };
+    let mut controller_tx = state.inner.controller_for_request(&frame.request_id).await;
     if controller_tx.is_none() {
-        let sessions = state.inner.sessions.lock().await;
-        controller_tx = sessions
-            .get(&session_id)
-            .filter(|session| session.machine_id == machine_id)
-            .and_then(|session| session.controller_tx.clone());
+        controller_tx = state
+            .inner
+            .session_controller_for_machine(&session_id, machine_id)
+            .await;
     }
     debug!(
         request_id = %frame.request_id,
@@ -527,40 +729,9 @@ async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: V
 }
 
 async fn handle_control_socket(socket: WebSocket, state: AppState) {
-    let (mut sender, mut receiver) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
-    let writer = tokio::spawn(async move {
-        let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
-        loop {
-            tokio::select! {
-            maybe = rx.recv() => {
-                let Some(message) = maybe else {
-                    break;
-                };
-                match message {
-                    Outbound::Text(message) => match serde_json::to_string(&message) {
-                        Ok(text) => {
-                            if sender.send(Message::Text(text)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(err) => warn!("failed to serialize outbound control message: {err}"),
-                    },
-                    Outbound::Binary(bytes) => {
-                        if sender.send(Message::Binary(bytes)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            _ = heartbeat.tick() => {
-                if sender.send(Message::Ping(Vec::new())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let (sender, mut receiver) = socket.split();
+    let (tx, rx) = outbound_channel();
+    let writer = spawn_writer(sender, rx, "control");
 
     while let Some(frame) = receiver.next().await {
         match frame {
@@ -618,10 +789,7 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         }
     };
     let request_id = frame.request_id.clone();
-    let session_id = {
-        let routes = state.inner.request_routes.lock().await;
-        routes.get(&request_id).cloned()
-    };
+    let session_id = state.inner.request_session_id(&request_id).await;
     let Some(session_id) = session_id else {
         send_error(
             tx,
@@ -632,21 +800,17 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         );
         return;
     };
-    let (machine_id, session_id) = {
-        let sessions = state.inner.sessions.lock().await;
-        let Some(session) = sessions.get(&session_id) else {
-            send_error(
-                tx,
-                Some(request_id),
-                Some(session_id),
-                ErrorCode::SessionExpired,
-                ErrorCode::SessionExpired.message(),
-            );
-            return;
-        };
-        (session.machine_id.clone(), session.session_id.clone())
+    let Some((machine_id, session_id)) = state.inner.command_route(&session_id).await else {
+        send_error(
+            tx,
+            Some(request_id),
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        );
+        return;
     };
-    let Some(host_tx) = host_tx(state, &machine_id).await else {
+    let Some(host_tx) = state.inner.host_tx(&machine_id).await else {
         send_error(
             tx,
             Some(request_id),
@@ -685,14 +849,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         );
         return;
     }
-    if !allow_rate_limit(
-        &state.inner.auth_attempts,
-        &open.machine_id,
-        12,
-        Duration::from_secs(60),
-    )
-    .await
-    {
+    if !state.inner.allow_auth_attempt(&open.machine_id).await {
         send_error(
             tx,
             request_id,
@@ -723,10 +880,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     }
 
-    let host = {
-        let hosts = state.inner.hosts.lock().await;
-        hosts.get(&open.machine_id).cloned()
-    };
+    let host = state.inner.host(&open.machine_id).await;
     let Some(host) = host else {
         send_error(
             tx,
@@ -749,7 +903,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     }
 
-    if host_has_active_session(state, &open.machine_id).await {
+    if state.inner.host_has_active_session(&open.machine_id).await {
         send_error(
             tx,
             request_id,
@@ -771,17 +925,17 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     };
     let controller_label = token_label(&open.control_token);
-    {
-        let mut pending = state.inner.pending_open.lock().await;
-        pending.insert(
+    state
+        .inner
+        .insert_pending_open(
             request_id.clone(),
             PendingOpen {
                 machine_id: open.machine_id.clone(),
                 controller_tx: tx.clone(),
                 controller_label: controller_label.clone(),
             },
-        );
-    }
+        )
+        .await;
 
     let auth = WireMessage::new(
         TYPE_HOST_AUTH_REQUEST,
@@ -794,9 +948,8 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
     )
     .expect("auth request serializes");
 
-    if host.tx.send(Outbound::Text(auth)).is_err() {
-        let mut pending = state.inner.pending_open.lock().await;
-        pending.remove(&request_id);
+    if !send_text(&host.tx, auth) {
+        state.inner.remove_pending_open(&request_id).await;
         send_error(
             tx,
             Some(request_id),
@@ -833,13 +986,10 @@ async fn handle_session_status(state: &AppState, tx: &Tx, message: WireMessage) 
         }
     };
 
-    let status = {
-        let sessions = state.inner.sessions.lock().await;
-        sessions
-            .get(&session_id)
-            .filter(|session| session.session_token == payload.session_token)
-            .cloned()
-    };
+    let status = state
+        .inner
+        .session_if_valid(&session_id, &payload.session_token)
+        .await;
 
     let Some(session) = status else {
         send_error(
@@ -851,7 +1001,7 @@ async fn handle_session_status(state: &AppState, tx: &Tx, message: WireMessage) 
         );
         return;
     };
-    let host_online = host_tx(state, &session.machine_id).await.is_some();
+    let host_online = state.inner.host_tx(&session.machine_id).await.is_some();
     let result = WireMessage::new(
         TYPE_SESSION_STATUS_RESULT,
         request_id,
@@ -893,15 +1043,10 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
         }
     };
 
-    let session = {
-        let mut sessions = state.inner.sessions.lock().await;
-        match sessions.get(&session_id) {
-            Some(session) if session.session_token == payload.session_token => {
-                sessions.remove(&session_id)
-            }
-            _ => None,
-        }
-    };
+    let session = state
+        .inner
+        .remove_session_if_valid(&session_id, &payload.session_token)
+        .await;
 
     let Some(session) = session else {
         send_error(
@@ -914,7 +1059,7 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     };
 
-    if let Some(host_tx) = host_tx(state, &session.machine_id).await {
+    if let Some(host_tx) = state.inner.host_tx(&session.machine_id).await {
         let closed = WireMessage::new(
             TYPE_HOST_SESSION_CLOSED,
             request_id.clone(),
@@ -988,17 +1133,10 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
         }
     };
 
-    let session = {
-        let mut sessions = state.inner.sessions.lock().await;
-        match sessions.get_mut(&session_id) {
-            Some(session) if session.session_token == payload.session_token => {
-                session.controller_tx = Some(tx.clone());
-                session.last_seen = rcw_common::audit::now_rfc3339();
-                Some(session.clone())
-            }
-            _ => None,
-        }
-    };
+    let session = state
+        .inner
+        .bind_controller_to_session(&session_id, &payload.session_token, tx.clone())
+        .await;
 
     let Some(session) = session else {
         send_error(
@@ -1011,7 +1149,7 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
         return;
     };
 
-    let Some(host_tx) = host_tx(state, &session.machine_id).await else {
+    let Some(host_tx) = state.inner.host_tx(&session.machine_id).await else {
         send_error(
             tx,
             request_id,
@@ -1023,19 +1161,16 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
     };
 
     message.session_id = Some(session.session_id.clone());
-    {
-        let mut routes = state.inner.request_routes.lock().await;
-        routes.insert(request_id_value.clone(), session.session_id.clone());
-    }
-    {
-        let mut controllers = state.inner.request_controllers.lock().await;
-        controllers.insert(request_id_value.clone(), tx.clone());
-    }
-    if host_tx.send(Outbound::Text(message)).is_err() {
-        let mut routes = state.inner.request_routes.lock().await;
-        routes.remove(&request_id_value);
-        let mut controllers = state.inner.request_controllers.lock().await;
-        controllers.remove(&request_id_value);
+    state
+        .inner
+        .track_request_route(
+            request_id_value.clone(),
+            session.session_id.clone(),
+            tx.clone(),
+        )
+        .await;
+    if !send_text(&host_tx, message) {
+        state.inner.clear_request_route(&request_id_value).await;
         send_error(
             tx,
             request_id,
@@ -1061,23 +1196,7 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
 }
 
 async fn unregister_host(state: &AppState, machine_id: &str) {
-    {
-        let mut hosts = state.inner.hosts.lock().await;
-        hosts.remove(machine_id);
-    }
-
-    let removed_sessions = {
-        let mut sessions = state.inner.sessions.lock().await;
-        let session_ids = sessions
-            .values()
-            .filter(|session| session.machine_id == machine_id)
-            .map(|session| session.session_id.clone())
-            .collect::<Vec<_>>();
-        session_ids
-            .into_iter()
-            .filter_map(|session_id| sessions.remove(&session_id))
-            .collect::<Vec<_>>()
-    };
+    let removed_sessions = state.inner.unregister_host(machine_id).await;
 
     for session in removed_sessions {
         if let Some(tx) = session.controller_tx {
@@ -1110,18 +1229,6 @@ async fn unregister_host(state: &AppState, machine_id: &str) {
         },
     );
     info!("host {machine_id} disconnected");
-}
-
-async fn host_tx(state: &AppState, machine_id: &str) -> Option<Tx> {
-    let hosts = state.inner.hosts.lock().await;
-    hosts.get(machine_id).map(|host| host.tx.clone())
-}
-
-async fn host_has_active_session(state: &AppState, machine_id: &str) -> bool {
-    let sessions = state.inner.sessions.lock().await;
-    sessions
-        .values()
-        .any(|session| session.machine_id == machine_id)
 }
 
 fn send_error(
@@ -1158,12 +1265,26 @@ fn audit(state: &AppState, event: AuditEvent) {
     }
 }
 
-fn send_text(tx: &Tx, message: WireMessage) {
-    let _ = tx.send(Outbound::Text(message));
+fn send_text(tx: &Tx, message: WireMessage) -> bool {
+    send_outbound(tx, Outbound::Text(message))
 }
 
-fn send_binary(tx: &Tx, bytes: Vec<u8>) {
-    let _ = tx.send(Outbound::Binary(bytes));
+fn send_binary(tx: &Tx, bytes: Vec<u8>) -> bool {
+    send_outbound(tx, Outbound::Binary(bytes))
+}
+
+fn send_outbound(tx: &Tx, outbound: Outbound) -> bool {
+    match tx.try_send(outbound) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("outbound websocket queue full; dropping message");
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            debug!("outbound websocket closed; dropping message");
+            false
+        }
+    }
 }
 
 async fn allow_rate_limit(
