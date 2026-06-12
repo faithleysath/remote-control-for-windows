@@ -70,12 +70,13 @@ impl BinaryFrame {
         let mut request_id = [0_u8; 16];
         request_id.copy_from_slice(&bytes[1..17]);
         let request_id = Ulid::from_bytes(request_id).to_string();
-        let sequence = u32::from_be_bytes(bytes[17..21].try_into().expect("slice length"));
-        let total_sequences = u32::from_be_bytes(bytes[21..25].try_into().expect("slice length"));
-        let payload_len =
-            u32::from_be_bytes(bytes[25..29].try_into().expect("slice length")) as usize;
+        let sequence = read_u32_be(bytes, 17, "sequence")?;
+        let total_sequences = read_u32_be(bytes, 21, "total_sequences")?;
+        let payload_len = read_u32_be(bytes, 25, "payload_len")? as usize;
         let payload_start = BINARY_FRAME_HEADER_LEN;
-        let payload_end = payload_start + payload_len;
+        let payload_end = payload_start
+            .checked_add(payload_len)
+            .ok_or_else(|| RcwError::Protocol("binary frame payload length overflow".to_owned()))?;
         if bytes.len() != payload_end {
             return Err(RcwError::Protocol(format!(
                 "binary frame payload length mismatch: header={payload_len}, actual={}",
@@ -90,6 +91,19 @@ impl BinaryFrame {
             payload: bytes[payload_start..payload_end].to_vec(),
         })
     }
+}
+
+fn read_u32_be(bytes: &[u8], offset: usize, field: &str) -> RcwResult<u32> {
+    let end = offset
+        .checked_add(4)
+        .ok_or_else(|| RcwError::Protocol(format!("{field} offset overflow")))?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or_else(|| RcwError::Protocol(format!("binary frame missing {field}")))?;
+    let array: [u8; 4] = slice
+        .try_into()
+        .map_err(|_| RcwError::Protocol(format!("binary frame invalid {field} length")))?;
+    Ok(u32::from_be_bytes(array))
 }
 
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -172,6 +186,7 @@ pub struct FileBinaryFrameReader {
     remaining: u64,
     total_sequences: u32,
     next_sequence: u32,
+    finished: bool,
     hasher: Sha256Accumulator,
 }
 
@@ -199,25 +214,26 @@ impl FileBinaryFrameReader {
             remaining: size,
             total_sequences: total_sequences_for_len(size)?,
             next_sequence: 0,
+            finished: false,
             hasher: Sha256Accumulator::new(),
         })
     }
 
     pub fn next_frame(&mut self) -> RcwResult<Option<Vec<u8>>> {
-        if self.remaining == 0 {
-            if self.next_sequence == 0 {
-                self.next_sequence = 1;
-                return BinaryFrame {
-                    kind: self.kind,
-                    request_id: self.request_id.clone(),
-                    sequence: 0,
-                    total_sequences: self.total_sequences,
-                    payload: Vec::new(),
-                }
-                .encode()
-                .map(Some);
-            }
+        if self.finished {
             return Ok(None);
+        }
+        if self.remaining == 0 {
+            self.finished = true;
+            return BinaryFrame {
+                kind: self.kind,
+                request_id: self.request_id.clone(),
+                sequence: self.next_sequence,
+                total_sequences: self.total_sequences,
+                payload: Vec::new(),
+            }
+            .encode()
+            .map(Some);
         }
 
         let chunk_len = self.remaining.min(CHUNK_SIZE as u64) as usize;
@@ -239,6 +255,9 @@ impl FileBinaryFrameReader {
         .encode()?;
         self.next_sequence += 1;
         self.remaining -= chunk_len as u64;
+        if self.remaining == 0 {
+            self.finished = true;
+        }
         Ok(Some(frame))
     }
 
@@ -343,4 +362,118 @@ pub fn chunk_binary(request_id: &str, kind: BinaryKind, bytes: &[u8]) -> RcwResu
         );
     }
     Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REQUEST_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn binary_frame_round_trips() {
+        let frame = BinaryFrame {
+            kind: BinaryKind::DownloadChunk,
+            request_id: REQUEST_ID.to_owned(),
+            sequence: 7,
+            total_sequences: 9,
+            payload: b"hello".to_vec(),
+        };
+
+        let encoded = frame.encode().unwrap();
+        let decoded = BinaryFrame::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.kind, frame.kind);
+        assert_eq!(decoded.request_id, frame.request_id);
+        assert_eq!(decoded.sequence, frame.sequence);
+        assert_eq!(decoded.total_sequences, frame.total_sequences);
+        assert_eq!(decoded.payload, frame.payload);
+    }
+
+    #[test]
+    fn binary_frame_rejects_short_header() {
+        let err = BinaryFrame::decode(&[BinaryKind::UploadChunk as u8]).unwrap_err();
+
+        assert!(err.to_string().contains("binary frame is too short"));
+    }
+
+    #[test]
+    fn binary_frame_rejects_unknown_kind() {
+        let mut encoded = BinaryFrame {
+            kind: BinaryKind::UploadChunk,
+            request_id: REQUEST_ID.to_owned(),
+            sequence: 0,
+            total_sequences: 1,
+            payload: Vec::new(),
+        }
+        .encode()
+        .unwrap();
+        encoded[0] = 99;
+
+        let err = BinaryFrame::decode(&encoded).unwrap_err();
+
+        assert!(err.to_string().contains("unsupported binary frame kind"));
+    }
+
+    #[test]
+    fn binary_frame_rejects_payload_length_mismatch() {
+        let mut encoded = BinaryFrame {
+            kind: BinaryKind::UploadChunk,
+            request_id: REQUEST_ID.to_owned(),
+            sequence: 0,
+            total_sequences: 1,
+            payload: b"abc".to_vec(),
+        }
+        .encode()
+        .unwrap();
+        encoded.truncate(encoded.len() - 1);
+
+        let err = BinaryFrame::decode(&encoded).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("binary frame payload length mismatch"));
+    }
+
+    #[test]
+    fn file_binary_frame_reader_emits_single_empty_frame() {
+        let path = temp_transfer_path("empty");
+        std::fs::write(&path, []).unwrap();
+        let mut reader =
+            FileBinaryFrameReader::new(&path, 0, REQUEST_ID, BinaryKind::DownloadChunk).unwrap();
+
+        let first = reader.next_frame().unwrap().unwrap();
+        let second = reader.next_frame().unwrap();
+
+        let decoded = BinaryFrame::decode(&first).unwrap();
+        assert_eq!(decoded.sequence, 0);
+        assert_eq!(decoded.total_sequences, 1);
+        assert!(decoded.payload.is_empty());
+        assert!(second.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_binary_frame_reader_stops_after_last_chunk() {
+        let path = temp_transfer_path("data");
+        std::fs::write(&path, b"abc").unwrap();
+        let mut reader =
+            FileBinaryFrameReader::new(&path, 3, REQUEST_ID, BinaryKind::UploadChunk).unwrap();
+
+        let first = reader.next_frame().unwrap().unwrap();
+        let second = reader.next_frame().unwrap();
+
+        let decoded = BinaryFrame::decode(&first).unwrap();
+        assert_eq!(decoded.sequence, 0);
+        assert_eq!(decoded.total_sequences, 1);
+        assert_eq!(decoded.payload, b"abc");
+        assert!(second.is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn temp_transfer_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("rcw-transfer-{label}-{}", Ulid::new()))
+    }
 }
