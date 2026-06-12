@@ -1,3 +1,12 @@
+use crate::{
+    audit,
+    state::PendingOpen,
+    ws::{
+        log_websocket_read_error, outbound_channel, send_binary, send_error, send_text,
+        spawn_writer, Tx,
+    },
+    AppState,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -18,14 +27,6 @@ use rcw_common::{
         TYPE_SESSION_STATUS_RESULT,
     },
     transfer::BinaryFrame,
-};
-use tracing::warn;
-
-use crate::{
-    audit,
-    state::PendingOpen,
-    ws::{outbound_channel, send_binary, send_error, send_text, spawn_writer, Tx},
-    AppState,
 };
 
 pub(crate) async fn control_ws(
@@ -56,7 +57,7 @@ async fn handle_control_socket(socket: WebSocket, state: AppState) {
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
             Err(err) => {
-                warn!("control websocket error: {err}");
+                log_websocket_read_error("control", err);
                 break;
             }
         }

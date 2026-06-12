@@ -294,10 +294,12 @@ impl<'a> ControlClient<'a> {
         let terminal = outcome.is_terminal();
         let mut messages = outcome.into_messages();
         if terminal {
+            close_control(&mut sink).await;
             self.store.touch_session(session)?;
             return command_response(messages);
         }
         messages.extend(collect_until_terminal(&mut stream, &[TYPE_UPLOAD_COMPLETE], wait).await?);
+        close_control(&mut sink).await;
         self.store.touch_session(session)?;
         command_response(messages)
     }
@@ -340,6 +342,7 @@ impl<'a> ControlClient<'a> {
                         output.flush().await?;
                         output.sync_all().await?;
                         drop(output);
+                        close_control(&mut sink).await;
                         self.store.touch_session(session)?;
                         return Ok(receiver.finish(message.payload_as()?));
                     }
@@ -360,7 +363,9 @@ async fn send_and_collect(
 ) -> Result<Vec<IncomingFrame>> {
     let (mut sink, mut stream) = connect_control(server).await?;
     send_json(&mut sink, message).await?;
-    collect_until_terminal(&mut stream, terminal_kinds, wait).await
+    let messages = collect_until_terminal(&mut stream, terminal_kinds, wait).await?;
+    close_control(&mut sink).await;
+    Ok(messages)
 }
 
 async fn collect_until_terminal(
@@ -484,6 +489,11 @@ async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
     sink.send(Message::Text(serde_json::to_string(&message)?))
         .await?;
     Ok(())
+}
+
+async fn close_control(sink: &mut WsSink) {
+    let _ = sink.send(Message::Close(None)).await;
+    let _ = sink.close().await;
 }
 
 async fn next_message_during_upload_send(stream: &mut WsStream) -> Result<IncomingFrame> {

@@ -62,23 +62,23 @@ pub(crate) enum Commands {
     Windows,
     #[command(name = "mouse-move")]
     Move {
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         x: i32,
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         y: i32,
     },
     #[command(name = "mouse-click")]
     Click {
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         x: i32,
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         y: i32,
         #[arg(long, default_value = "left")]
         button: String,
     },
     #[command(name = "mouse-scroll")]
     Scroll {
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         delta: i32,
     },
     #[command(name = "keyboard-type")]
@@ -110,5 +110,28 @@ pub(crate) fn command_name(command: &Commands) -> &'static str {
         Commands::Key { .. } => "keyboard.key",
         Commands::Close => "disconnect",
         Commands::Mcp => "mcp",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands};
+
+    #[test]
+    fn parses_negative_mouse_scroll_delta() {
+        let cli = Cli::try_parse_from(["rcwctl", "mouse-scroll", "--delta", "-1"]).unwrap();
+        assert!(matches!(cli.command, Commands::Scroll { delta: -1 }));
+    }
+
+    #[test]
+    fn parses_negative_mouse_coordinates() {
+        let cli =
+            Cli::try_parse_from(["rcwctl", "mouse-click", "--x", "-20", "--y", "-10"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Click { x: -20, y: -10, .. }
+        ));
     }
 }

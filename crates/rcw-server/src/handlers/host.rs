@@ -23,8 +23,8 @@ use tracing::{debug, info, warn};
 use crate::{
     audit,
     ws::{
-        make_error, outbound_channel, send_binary, send_error, send_text, spawn_writer,
-        HEARTBEAT_INTERVAL_MS,
+        log_websocket_read_error, make_error, outbound_channel, send_binary, send_error, send_text,
+        spawn_writer, HEARTBEAT_INTERVAL_MS,
     },
     AppState,
 };
@@ -153,7 +153,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
             Err(err) => {
-                warn!("host websocket error for {}: {err}", hello.machine_id);
+                log_websocket_read_error(&format!("host {}", hello.machine_id), err);
                 break;
             }
         }

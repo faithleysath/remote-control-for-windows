@@ -113,3 +113,37 @@ fn send_outbound(tx: &Tx, outbound: Outbound) -> bool {
         }
     }
 }
+
+pub(crate) fn log_websocket_read_error(peer: &str, err: axum::Error) {
+    let message = err.to_string();
+    if is_unclean_disconnect(&message) {
+        debug!("{peer} websocket closed without close handshake: {message}");
+    } else {
+        warn!("{peer} websocket error: {message}");
+    }
+}
+
+fn is_unclean_disconnect(message: &str) -> bool {
+    message.contains("Connection reset without closing handshake")
+        || message.contains("Connection reset by peer")
+        || message.contains("Broken pipe")
+        || message.contains("connection closed before message completed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unclean_disconnect;
+
+    #[test]
+    fn classifies_common_unclean_disconnects() {
+        assert!(is_unclean_disconnect(
+            "WebSocket protocol error: Connection reset without closing handshake",
+        ));
+        assert!(is_unclean_disconnect(
+            "IO error: Connection reset by peer (os error 104)",
+        ));
+        assert!(!is_unclean_disconnect(
+            "WebSocket protocol error: invalid frame header"
+        ));
+    }
+}
