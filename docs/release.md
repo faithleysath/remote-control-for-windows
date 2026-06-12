@@ -6,7 +6,7 @@
 
 ## 版本策略
 
-workspace 当前版本为 `0.1.2`。在采用更完整的兼容性策略前：
+workspace 当前版本为 `0.1.3`。在采用更完整的兼容性策略前：
 
 - patch release 不应破坏协议语义或 CLI 行为。
 - 破坏 wire format 的改动必须提升协议版本。
@@ -17,11 +17,11 @@ workspace 当前版本为 `0.1.2`。在采用更完整的兼容性策略前：
 推荐使用 tag 触发：
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
-也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写 tag，例如 `v0.1.2`。手动运行时 workflow 会以当前 commit 为目标创建 release tag。
+也可以在 GitHub Actions 页面手动运行 `Release` workflow，并填写 tag，例如 `v0.1.3`。手动运行时 workflow 会以当前 commit 为目标创建 release tag。
 
 ## 发布前清单
 

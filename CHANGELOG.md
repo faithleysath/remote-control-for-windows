@@ -4,6 +4,22 @@
 
 ## 未发布
 
+暂无。
+
+## 0.1.3 - 2026-06-12
+
+- 修复文件上传/下载的清理路径，降低中断传输后残留临时文件、泄漏句柄或误判成功的风险。
+- 加强二进制传输帧解析，返回协议错误而不是依赖 panic，并补齐帧解析边界测试。
+- 将 `rcwctl`、`rcw-server` 和 `rcw-host` 的大入口文件拆成按职责划分的模块，降低后续维护成本。
+- 引入 `rcwctl` 控制端 client/transport 边界，并显式化上传、下载的请求生命周期。
+- 加固 server outbound 状态处理，减少慢连接和关闭路径上的内存与状态一致性风险。
+- 将 host 进程输出队列改为有界通道，避免持续输出时无限积压内存。
+- 为 Windows FFI 边界增加 RAII 资源管理和 `unsafe` 安全说明。
+- 升级 GitHub artifact actions，保持发布流水线使用当前 Node 运行时。
+- 将 Rust workspace 和 npm 包版本提升到 `0.1.3`。
+
+## 0.1.2 - 2026-06-12
+
 - 切换 npm 发布到 GitHub Actions trusted publishing，移除 `NPM_TOKEN` 依赖。
 - 将下一次发布基线抬到 `0.1.2`。
 
