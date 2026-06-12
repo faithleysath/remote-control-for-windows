@@ -65,12 +65,12 @@ rcwctl [GLOBAL_OPTIONS] <COMMAND>
 
 日志不记录完整 token、session token、TOTP seed 或文件内容。
 
-## open
+## connect
 
 建立会话。
 
 ```bash
-rcwctl open --id 8K4F-2M7Q --totp 183942
+rcwctl connect --id 8K4F-2M7Q --totp 183942
 ```
 
 成功后写入本地会话文件。
@@ -173,9 +173,9 @@ rcwctl --json windows
 鼠标操作。
 
 ```bash
-rcwctl move --x 400 --y 300
-rcwctl click --x 400 --y 300 --button left
-rcwctl scroll --delta -3
+rcwctl mouse-move --x 400 --y 300
+rcwctl mouse-click --x 400 --y 300 --button left
+rcwctl mouse-scroll --delta -3
 ```
 
 坐标默认使用屏幕绝对坐标。后续可以扩展为窗口相对坐标。
@@ -185,22 +185,67 @@ rcwctl scroll --delta -3
 键盘操作。
 
 ```bash
-rcwctl type "hello world"
-rcwctl key Ctrl+L
-rcwctl key Enter
+rcwctl keyboard-type "hello world"
+rcwctl keyboard-key Ctrl+L
+rcwctl keyboard-key Enter
 ```
 
 按键名称使用跨平台规范名，`rcw-host.exe` 负责映射到 Windows 虚拟键。
 
-## close
+## disconnect
 
 关闭当前会话。
 
 ```bash
-rcwctl close
+rcwctl disconnect
 ```
 
 关闭后删除本地会话文件。
+
+## mcp
+
+启动一个 stdio MCP 服务器。
+
+```bash
+rcwctl --server ws://127.0.0.1:7800 --token "$RCW_CONTROL_TOKEN" mcp
+```
+
+也可以通过 npm 元包交给 MCP 客户端按需拉起：
+
+```json
+{
+  "mcpServers": {
+    "rcw": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "rcwctl",
+        "--server",
+        "ws://127.0.0.1:7800",
+        "--token",
+        "replace-with-control-token",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+MCP 工具：
+
+- `connect`：用机器 ID 和当前 TOTP 打开远控会话。
+- `disconnect`：关闭当前远控会话。
+- `status`：查询当前会话和被控端在线状态。
+- `exec`：执行远程命令。
+- `upload`：流式读取 MCP 服务器本机路径并上传到远端路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
+- `download`：下载远端文件并流式写入 MCP 服务器本机路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
+- `transfer_status`：查询后台上传或下载任务的运行状态、最终结果或错误。
+- `screenshot`：截图并写入 MCP 服务器本机路径。
+- `windows`：列出窗口。
+- `mouse_move`、`mouse_click`、`mouse_scroll`：鼠标操作。
+- `keyboard_type`、`keyboard_key`：键盘输入。
+
+`mcp` 是长期运行进程。它把打开后的 session 和后台传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 `status=running` 和 `task_id`，之后调用 `transfer_status` 查询。`wait_timeout_ms=0` 表示立即转后台。MCP 进程退出后，内存中的 session 信息和任务状态也随之丢失；需要重新调用 `connect`。
 
 ## Codex 调用约定
 

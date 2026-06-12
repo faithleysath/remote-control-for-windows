@@ -1,6 +1,14 @@
 mod platform;
 
-use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -22,7 +30,11 @@ use rcw_common::{
         TYPE_HOST_SESSION_OPENED, TYPE_UPLOAD_COMPLETE,
     },
     totp,
-    transfer::{chunk_binary, sha256_bytes, write_all_new, BinaryFrame, BinaryKind},
+    transfer::{
+        chunk_binary, commit_temp_output_file, create_temp_output_file, sha256_bytes,
+        temp_output_path, total_sequences_for_len, BinaryFrame, BinaryKind, FileBinaryFrameReader,
+        Sha256Accumulator,
+    },
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -33,6 +45,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 use tracing::{error, warn};
 
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+
+const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const UPLOAD_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -56,8 +71,20 @@ struct HostContext {
 struct UploadState {
     session_id: Option<String>,
     args: UploadArgs,
-    chunks: Vec<Option<Vec<u8>>>,
-    received: u32,
+    file: Option<File>,
+    temp_path: PathBuf,
+    next_sequence: u32,
+    total_sequences: u32,
+    bytes_written: u64,
+    hasher: Sha256Accumulator,
+    last_activity: Instant,
+}
+
+impl Drop for UploadState {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.temp_path);
+    }
 }
 
 #[tokio::main]
@@ -145,36 +172,47 @@ async fn run_host_connection(context: Arc<HostContext>, ws_url: String) -> Resul
 
     let mut active_session: Option<String> = None;
     let mut uploads: HashMap<String, UploadState> = HashMap::new();
+    let mut upload_sweep = tokio::time::interval(UPLOAD_SWEEP_INTERVAL);
     println!("Connection: connected");
     append_host_audit(&context, "host.connected", None, None, None, Some("ok"));
 
-    while let Some(frame) = stream.next().await {
-        match frame {
-            Ok(Message::Text(text)) => {
-                let message: WireMessage = match serde_json::from_str(&text) {
-                    Ok(message) => message,
-                    Err(err) => {
-                        warn!("invalid server frame: {err}");
-                        continue;
-                    }
+    loop {
+        tokio::select! {
+            maybe_frame = stream.next() => {
+                let Some(frame) = maybe_frame else {
+                    break;
                 };
-                handle_server_message(
-                    &context,
-                    &mut sink,
-                    &mut active_session,
-                    &mut uploads,
-                    message,
-                )
-                .await?;
+                match frame {
+                    Ok(Message::Text(text)) => {
+                        let message: WireMessage = match serde_json::from_str(&text) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                warn!("invalid server frame: {err}");
+                                continue;
+                            }
+                        };
+                        handle_server_message(
+                            &context,
+                            &mut sink,
+                            &mut active_session,
+                            &mut uploads,
+                            message,
+                        )
+                        .await?;
+                    }
+                    Ok(Message::Binary(bytes)) => {
+                        handle_binary_frame(&context, &mut sink, &mut uploads, bytes).await?;
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+                    Ok(Message::Frame(_)) => {}
+                    Err(err) => {
+                        return Err(anyhow!("host websocket error: {err}"));
+                    }
+                }
             }
-            Ok(Message::Binary(bytes)) => {
-                handle_binary_frame(&context, &mut sink, &mut uploads, bytes).await?;
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-            Ok(Message::Frame(_)) => {}
-            Err(err) => {
-                return Err(anyhow!("host websocket error: {err}"));
+            _ = upload_sweep.tick() => {
+                prune_idle_uploads(&mut uploads);
             }
         }
     }
@@ -254,8 +292,10 @@ async fn handle_server_message(
         }
         TYPE_HOST_SESSION_CLOSED => {
             let payload: HostSessionClosedPayload = message.payload_as()?;
+            let session_id = payload.session_id.clone();
             println!("Session: closed ({})", payload.reason);
             *active_session = None;
+            remove_uploads_for_session(uploads, &session_id);
             append_host_audit(
                 context,
                 "session.closed",
@@ -484,6 +524,10 @@ fn begin_upload(
     if args.remote_path.trim().is_empty() {
         return Err(anyhow!("empty upload path"));
     }
+    let total_sequences = total_sequences_for_len(args.size)?;
+    let remote_path = PathBuf::from(&args.remote_path);
+    let temp_path = temp_output_path(&remote_path, &request_id);
+    let file = create_temp_output_file(&remote_path, &temp_path, args.overwrite)?;
     println!(
         "[{}] upload waiting for chunks request={}",
         rcw_common::audit::now_rfc3339(),
@@ -502,8 +546,13 @@ fn begin_upload(
         UploadState {
             session_id: message.session_id,
             args,
-            chunks: Vec::new(),
-            received: 0,
+            file: Some(file),
+            temp_path,
+            next_sequence: 0,
+            total_sequences,
+            bytes_written: 0,
+            hasher: Sha256Accumulator::new(),
+            last_activity: Instant::now(),
         },
     );
     Ok(())
@@ -516,9 +565,10 @@ async fn command_download(
     args: serde_json::Value,
 ) -> Result<()> {
     let args: DownloadArgs = serde_json::from_value(args)?;
-    let bytes = std::fs::read(&args.remote_path)?;
-    let sha256 = sha256_bytes(&bytes);
-    send_binary_chunks(sink, request_id, BinaryKind::DownloadChunk, &bytes).await?;
+    let path = PathBuf::from(&args.remote_path);
+    let size = fs::metadata(&path)?.len();
+    let sha256 =
+        send_file_binary_chunks(sink, request_id, BinaryKind::DownloadChunk, &path, size).await?;
     send_complete_kind(
         sink,
         TYPE_DOWNLOAD_COMPLETE,
@@ -528,7 +578,7 @@ async fn command_download(
             ok: true,
             exit_code: Some(0),
             duration_ms: 0,
-            size: Some(bytes.len() as u64),
+            size: Some(size),
             sha256: Some(sha256),
             summary: Some(format!("read {}", args.remote_path)),
         },
@@ -686,8 +736,7 @@ async fn handle_binary_frame(
     }
 
     let request_id = frame.request_id.clone();
-    let total_sequences = frame.total_sequences;
-    let Some(state) = uploads.get_mut(&request_id) else {
+    if !uploads.contains_key(&request_id) {
         send_error(
             sink,
             Some(request_id),
@@ -697,32 +746,55 @@ async fn handle_binary_frame(
         )
         .await?;
         return Ok(());
+    }
+
+    let action = {
+        let state = uploads
+            .get_mut(&request_id)
+            .ok_or_else(|| anyhow!("upload state disappeared"))?;
+        if frame.total_sequences != state.total_sequences {
+            Some((
+                state.session_id.clone(),
+                ErrorCode::InternalError,
+                format!(
+                    "upload chunk total sequence mismatch: expected {}, got {}",
+                    state.total_sequences, frame.total_sequences
+                ),
+            ))
+        } else if frame.sequence != state.next_sequence {
+            Some((
+                state.session_id.clone(),
+                ErrorCode::InternalError,
+                format!(
+                    "upload chunk sequence mismatch: expected {}, got {}",
+                    state.next_sequence, frame.sequence
+                ),
+            ))
+        } else {
+            let file = state
+                .file
+                .as_mut()
+                .ok_or_else(|| anyhow!("upload file handle is closed"))?;
+            file.write_all(&frame.payload)?;
+            state.hasher.update(&frame.payload);
+            state.bytes_written += frame.payload.len() as u64;
+            state.next_sequence += 1;
+            state.last_activity = Instant::now();
+            None
+        }
     };
 
-    if state.chunks.is_empty() {
-        let total = usize::try_from(total_sequences)
-            .map_err(|_| anyhow!("invalid upload total sequence count"))?;
-        state.chunks = vec![None; total];
-    }
-    let index =
-        usize::try_from(frame.sequence).map_err(|_| anyhow!("invalid upload chunk sequence"))?;
-    if index >= state.chunks.len() {
-        send_error(
-            sink,
-            Some(frame.request_id),
-            state.session_id.clone(),
-            ErrorCode::InternalError,
-            "upload chunk sequence is out of range",
-        )
-        .await?;
+    if let Some((session_id, code, message)) = action {
+        uploads.remove(&request_id);
+        send_error(sink, Some(request_id), session_id, code, &message).await?;
         return Ok(());
     }
-    if state.chunks[index].is_none() {
-        state.chunks[index] = Some(frame.payload);
-        state.received += 1;
-    }
 
-    if state.received == total_sequences {
+    let complete = uploads
+        .get(&request_id)
+        .map(|state| state.next_sequence == state.total_sequences)
+        .unwrap_or(false);
+    if complete {
         let state = uploads
             .remove(&request_id)
             .ok_or_else(|| anyhow!("upload disappeared during finalization"))?;
@@ -735,47 +807,39 @@ async fn finalize_upload(
     context: &HostContext,
     sink: &mut WsSink,
     request_id: &str,
-    state: UploadState,
+    mut state: UploadState,
 ) -> Result<()> {
-    let mut bytes = Vec::with_capacity(state.args.size as usize);
-    for chunk in state.chunks {
-        let Some(chunk) = chunk else {
-            send_error(
-                sink,
-                Some(request_id.to_owned()),
-                state.session_id,
-                ErrorCode::RequestTimeout,
-                "upload did not receive all chunks",
-            )
-            .await?;
-            return Err(anyhow!("upload did not receive all chunks"));
-        };
-        bytes.extend_from_slice(&chunk);
+    if let Some(mut file) = state.file.take() {
+        file.flush()?;
     }
-    if bytes.len() as u64 != state.args.size {
+    if state.bytes_written != state.args.size {
         send_error(
             sink,
             Some(request_id.to_owned()),
-            state.session_id,
+            state.session_id.clone(),
             ErrorCode::ChecksumMismatch,
             "upload size mismatch",
         )
         .await?;
         return Err(anyhow!("upload size mismatch"));
     }
-    let actual = sha256_bytes(&bytes);
+    let actual = std::mem::replace(&mut state.hasher, Sha256Accumulator::new()).finalize();
     if actual != state.args.sha256 {
         send_error(
             sink,
             Some(request_id.to_owned()),
-            state.session_id,
+            state.session_id.clone(),
             ErrorCode::ChecksumMismatch,
             ErrorCode::ChecksumMismatch.message(),
         )
         .await?;
         return Err(anyhow!("upload checksum mismatch"));
     }
-    write_all_new(&state.args.remote_path, &bytes, state.args.overwrite)?;
+    commit_temp_output_file(
+        &state.temp_path,
+        Path::new(&state.args.remote_path),
+        state.args.overwrite,
+    )?;
     send_complete_kind(
         sink,
         TYPE_UPLOAD_COMPLETE,
@@ -785,7 +849,7 @@ async fn finalize_upload(
             ok: true,
             exit_code: Some(0),
             duration_ms: 0,
-            size: Some(bytes.len() as u64),
+            size: Some(state.bytes_written),
             sha256: Some(actual),
             summary: Some(format!("wrote {}", state.args.remote_path)),
         },
@@ -795,7 +859,7 @@ async fn finalize_upload(
         context,
         "command.complete",
         Some(request_id.to_owned()),
-        state.session_id,
+        state.session_id.clone(),
         Some(COMMAND_UPLOAD_BEGIN.to_owned()),
         Some("ok"),
     );
@@ -832,6 +896,40 @@ async fn send_binary_chunks(
         sink.send(Message::Binary(frame)).await?;
     }
     Ok(())
+}
+
+fn remove_uploads_for_session(uploads: &mut HashMap<String, UploadState>, session_id: &str) {
+    let before = uploads.len();
+    uploads.retain(|_, state| state.session_id.as_deref() != Some(session_id));
+    let removed = before.saturating_sub(uploads.len());
+    if removed > 0 {
+        warn!(session_id = %session_id, removed, "removed pending uploads for closed session");
+    }
+}
+
+fn prune_idle_uploads(uploads: &mut HashMap<String, UploadState>) {
+    let now = Instant::now();
+    uploads.retain(|request_id, state| {
+        let keep = now.duration_since(state.last_activity) <= UPLOAD_IDLE_TIMEOUT;
+        if !keep {
+            warn!(request_id = %request_id, "removed idle pending upload");
+        }
+        keep
+    });
+}
+
+async fn send_file_binary_chunks(
+    sink: &mut WsSink,
+    request_id: &str,
+    kind: BinaryKind,
+    path: &Path,
+    size: u64,
+) -> Result<String> {
+    let mut reader = FileBinaryFrameReader::new(path, size, request_id, kind)?;
+    while let Some(frame) = reader.next_frame()? {
+        sink.send(Message::Binary(frame)).await?;
+    }
+    Ok(reader.finalize_sha256())
 }
 
 async fn send_output(

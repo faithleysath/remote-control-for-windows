@@ -41,7 +41,7 @@ v1 链路已经在以下 crate 中实现：
 - `rcw-common`：协议、配置、ID、TOTP、审计 helper 和传输 helper。
 - `rcw-server`：健康检查、host/control WebSocket 端点、token 校验、TOTP 会话创建、内存 session、relay 路由、close、status、ping/heartbeat、基础限流和 server 审计。
 - `rcw-host`：Windows 被控端连接、重连循环、机器 ID/TOTP 显示、剪贴板刷新、TOTP 鉴权、命令执行、文件传输、截图、窗口/鼠标/键盘操作、审计、权限显示和电源 guard。
-- `rcwctl`：`open/status/exec/upload/download/screenshot/windows/move/click/scroll/type/key/close`、JSON 输出、session 文件复用和 controller 审计。
+- `rcwctl`：`connect/status/exec/upload/download/screenshot/windows/mouse-move/mouse-click/mouse-scroll/keyboard-type/keyboard-key/disconnect`、JSON 输出、session 文件复用和 controller 审计。
 
 截至 2026-06-11，该基线已在 Windows VM 中完成主要验证；剩余标准用户交互桌面权限显示验证项见 [testing.md](testing.md)。
 

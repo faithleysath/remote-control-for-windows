@@ -10,7 +10,7 @@
 - `GET /ws/host`
 - `GET /ws/control`
 
-控制消息使用 JSON text frame。文件内容和截图数据使用 WebSocket binary frame 分块传输；对应的 begin/complete/metadata 仍通过 JSON 消息承载。
+控制消息使用 JSON text frame。文件内容和截图数据使用 WebSocket binary frame 分块传输；对应的 begin/complete/metadata 仍通过 JSON 消息承载。文件上传和下载按块流式读写本地文件，不把文件主体放入 JSON 或 base64 参数。
 
 ## 消息通用字段
 
@@ -245,8 +245,8 @@
 - `session.status`：查询会话和主机在线状态。
 - `session.close`：关闭会话。
 - `exec`：执行终端命令。
-- `upload.begin`、`upload.chunk`、`upload.complete`：上传文件；chunk 数据通过 binary frame 承载，JSON 消息只描述元数据和完成状态。
-- `download.begin`、`download.chunk`、`download.complete`：下载文件；chunk 数据通过 binary frame 承载，JSON 消息只描述元数据和完成状态。
+- `upload.begin`、`upload.chunk`、`upload.complete`：上传文件；chunk 数据通过 binary frame 流式承载，JSON 消息只描述元数据和完成状态。
+- `download.begin`、`download.chunk`、`download.complete`：下载文件；chunk 数据通过 binary frame 流式承载，JSON 消息只描述元数据和完成状态。
 - `screenshot`：截屏。
 - `windows`：列出窗口。
 - `mouse.move`：移动光标。

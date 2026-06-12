@@ -56,7 +56,7 @@ $env:RCW_SERVER_URL = "wss://test-remote.example.com"
 2. 编译期嵌入值。
 3. 默认值 `120`。
 
-控制端和被控端必须使用相同周期；周期不一致时，`rcwctl open` 应失败并提示重新检查配置。
+控制端和被控端必须使用相同周期；周期不一致时，`rcwctl connect` 应失败并提示重新检查配置。
 
 ### 服务端监听
 

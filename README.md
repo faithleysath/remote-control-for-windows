@@ -23,7 +23,7 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 - 本地 Rust 检查：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`。
 - Linux 上通过 `cargo-xwin` 交叉构建静态 CRT 的 Windows 被控端。
-- Windows VM 实机 E2E：会话 `open/status/close`、错误 token/TOTP/TOTP 周期处理、命令执行、命令超时清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
+- Windows VM 实机 E2E：会话 `connect/status/disconnect`、错误 token/TOTP/TOTP 周期处理、命令执行、命令超时清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
 
 仍需补齐的验证项：
 
@@ -72,11 +72,11 @@ cargo run -p rcw-server
 export RCW_SERVER_URL=ws://127.0.0.1:7800
 export RCW_CONTROL_TOKEN='replace-with-a-random-token'
 
-rcwctl open --id <machine-id> --totp <current-totp>
+rcwctl connect --id <machine-id> --totp <current-totp>
 rcwctl status
 rcwctl exec -- pwsh -NoProfile -Command "hostname"
 rcwctl screenshot --output screen.png
-rcwctl close
+rcwctl disconnect
 ```
 
 给 agent 使用时建议开启 JSON 输出：
@@ -84,6 +84,29 @@ rcwctl close
 ```bash
 rcwctl --json exec -- pwsh -NoProfile -Command "hostname"
 ```
+
+也可以把控制端作为 stdio MCP 服务器交给 MCP 客户端长期运行：
+
+```json
+{
+  "mcpServers": {
+    "rcw": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "rcwctl",
+        "--server",
+        "ws://127.0.0.1:7800",
+        "--token",
+        "replace-with-control-token",
+        "mcp"
+      ]
+    }
+  }
+}
+```
+
+MCP 模式下先调用 `connect` 打开远控会话，再调用 `exec`、`screenshot`、`windows`、鼠标键盘和文件传输工具。agent 发送或接收文件使用 `upload` / `download` 这类路径型工具，让 MCP 服务器自己流式读写本机文件；文件主体走 WebSocket binary frame，不走 base64。`upload` / `download` 默认等待 60 秒，未完成就返回 `task_id`，后续用 `transfer_status` 查询。MCP 进程只在内存中保存 session 和后台传输任务状态，不写普通 CLI 的本地 session 文件。
 
 ## 构建
 

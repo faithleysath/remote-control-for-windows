@@ -9,17 +9,17 @@
 已验证：
 
 - host 启动、连接 server、显示 machine ID/TOTP、更新剪贴板，并显示管理员 elevated 权限状态。
-- `rcwctl open/status/close`。
+- `rcwctl connect/status/disconnect`。
 - 错误控制端 token、错误 TOTP、TOTP 周期不一致均返回预期错误。
 - 远程 Windows 命令执行。
 - 命令超时返回 `RequestTimeout`，且被测 `pwsh` 进程无残留。
 - 上传/下载 SHA-256 一致。
 - 可见窗口枚举。
 - 交互桌面截图生成 1280x720 PNG。
-- 鼠标 move/click/scroll 和键盘 type/key 均执行成功，并通过 Notepad 截图确认。
+- 鼠标 `mouse-move`/`mouse-click`/`mouse-scroll` 和键盘 `keyboard-type`/`keyboard-key` 均执行成功，并通过 Notepad 截图确认。
 - 剪贴板内容只包含 server、machine ID、验证码和有效期，不包含 control token、session token、TOTP seed 或原始机器标识。
 - `powercfg /requests` 显示 `rcw-host.exe` 持有 `DISPLAY` 和 `SYSTEM` 请求；临时缩短 AC 显示/睡眠超时后，session 仍保持 active。
-- `rcwctl close` 后恢复旧 session 文件再请求状态，返回 `SessionExpired`。
+- `rcwctl disconnect` 后恢复旧 session 文件再请求状态，返回 `SessionExpired`。
 - server 和 host 审计日志包含可按 request ID 对齐的事件。
 
 剩余验证缺口：
@@ -76,7 +76,7 @@ rcw-server
 ```bash
 export RCW_SERVER_URL=ws://<server-ip>:7800
 export RCW_CONTROL_TOKEN=test-control-token
-rcwctl open --id <machine-id> --totp <totp>
+rcwctl connect --id <machine-id> --totp <totp>
 ```
 
 ## E2E 清单
@@ -84,11 +84,11 @@ rcwctl open --id <machine-id> --totp <totp>
 会话和鉴权：
 
 - host 无 token 可登记在线。
-- controller 没有正确控制端 token 不能 open。
+- controller 没有正确控制端 token 不能 connect。
 - 错误 TOTP 失败。
 - TOTP 周期不一致失败。
-- 成功 open 后，`status` 返回 host online 和 session active。
-- `close` 使 session 失效，并删除本地 session 文件。
+- 成功 connect 后，`status` 返回 host online 和 session active。
+- `disconnect` 使 session 失效，并删除本地 session 文件。
 
 命令执行：
 
@@ -102,6 +102,8 @@ rcwctl open --id <machine-id> --totp <totp>
 - upload 默认不覆盖已有文件。
 - upload 带 `--overwrite` 可以替换文件。
 - download 后 SHA-256 与源文件一致。
+- upload/download 通过 binary frame 流式传输，参数和日志中不出现文件主体或 base64 内容。
+- MCP upload/download 设置较短 `wait_timeout_ms` 时返回 `task_id`，`transfer_status` 最终返回 completed 或 failed。
 - 损坏或不匹配的传输返回 `checksum_mismatch` 或等价结构化错误。
 
 GUI 操作：
