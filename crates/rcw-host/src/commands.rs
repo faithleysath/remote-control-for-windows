@@ -25,6 +25,8 @@ use crate::{
     platform, HostContext,
 };
 
+const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 128;
+
 pub(crate) async fn execute_command(
     context: &HostContext,
     sink: &mut WsSink,
@@ -149,7 +151,8 @@ async fn command_exec(
     command.kill_on_drop(true);
     let mut child = command.spawn()?;
     let pid = child.id();
-    let (output_tx, mut output_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let (output_tx, mut output_rx) =
+        tokio::sync::mpsc::channel::<(String, String)>(PROCESS_OUTPUT_QUEUE_CAPACITY);
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(read_process_stream("stdout", stdout, output_tx.clone()));
     }
@@ -367,7 +370,7 @@ async fn complete_simple(
 async fn read_process_stream<R>(
     stream_name: &'static str,
     mut reader: R,
-    tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    tx: tokio::sync::mpsc::Sender<(String, String)>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -377,7 +380,9 @@ async fn read_process_stream<R>(
             Ok(0) => break,
             Ok(read) => {
                 let data = String::from_utf8_lossy(&buffer[..read]).to_string();
-                let _ = tx.send((stream_name.to_owned(), data));
+                if tx.send((stream_name.to_owned(), data)).await.is_err() {
+                    break;
+                }
             }
             Err(_) => break,
         }
