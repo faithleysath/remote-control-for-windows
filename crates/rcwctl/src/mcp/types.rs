@@ -54,6 +54,11 @@ pub(super) struct ConnectParams {
     #[serde(default)]
     #[schemars(description = "Optional TOTP period override in seconds.")]
     pub(super) totp_period_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Replace an existing active session for this host after TOTP verification."
+    )]
+    pub(super) force_reconnect: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

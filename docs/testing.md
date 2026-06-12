@@ -89,6 +89,11 @@ rcwctl connect --id <machine-id> --totp <totp>
 - TOTP 周期不一致失败。
 - 成功 connect 后，`status` 返回 host online 和 session active。
 - `disconnect` 使 session 失效，并删除本地 session 文件。
+- 同一 host 已有 active session 时，普通 `connect` 返回 `HostBusy`。
+- 使用新的 TOTP 和 `connect --force` / MCP `force_reconnect=true` 可以替换旧 session，并且旧 session 失效。
+- MCP 正常退出时会尽力关闭当前 session；MCP 崩溃或强杀后，可通过 force reconnect 恢复。
+- host Ctrl-C 退出后，服务端注销 host 并使相关 session 失效。
+- 服务端后台清理器会回收长期空闲 session、过期 pending open、过期请求路由和空的限流 key。
 
 命令执行：
 

@@ -62,6 +62,7 @@ async fn run() -> Result<i32> {
             id,
             totp,
             totp_period_seconds,
+            force,
         } => {
             open_session(
                 &cli,
@@ -70,6 +71,7 @@ async fn run() -> Result<i32> {
                 id,
                 totp,
                 *totp_period_seconds,
+                *force,
             )
             .await
         }

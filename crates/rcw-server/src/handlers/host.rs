@@ -11,10 +11,11 @@ use rcw_common::{
     ids::{new_session_id, new_session_token},
     protocol::{
         ControlOpenResultPayload, ErrorCode, HostAuthResultPayload, HostHelloAckPayload,
-        HostHelloPayload, HostSessionOpenedPayload, WireMessage, PROTOCOL_VERSION,
-        TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT,
+        HostHelloPayload, HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage,
+        PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT,
         TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO,
-        TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_OPENED, TYPE_UPLOAD_COMPLETE,
+        TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
+        TYPE_UPLOAD_COMPLETE,
     },
     transfer::BinaryFrame,
 };
@@ -227,6 +228,10 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
         return;
     }
 
+    if pending.force_reconnect {
+        close_existing_sessions_for_force_reconnect(state, machine_id, &request_id).await;
+    }
+
     let session_id = new_session_id();
     let session_token = new_session_token();
     state
@@ -277,6 +282,54 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
             ..AuditEvent::new("server", "session.created")
         },
     );
+}
+
+async fn close_existing_sessions_for_force_reconnect(
+    state: &AppState,
+    machine_id: &str,
+    request_id: &str,
+) {
+    let removed_sessions = state.inner.remove_sessions_for_machine(machine_id).await;
+    if removed_sessions.is_empty() {
+        return;
+    }
+
+    let host_tx = state.inner.host_tx(machine_id).await;
+    for session in removed_sessions {
+        if let Some(tx) = &session.controller_tx {
+            send_error(
+                tx,
+                Some(request_id.to_owned()),
+                Some(session.session_id.clone()),
+                ErrorCode::SessionExpired,
+                "session replaced by force reconnect",
+            );
+        }
+        if let Some(tx) = &host_tx {
+            let closed = WireMessage::new(
+                TYPE_HOST_SESSION_CLOSED,
+                Some(request_id.to_owned()),
+                Some(session.session_id.clone()),
+                HostSessionClosedPayload {
+                    session_id: session.session_id.clone(),
+                    reason: "force_reconnect".to_owned(),
+                },
+            )
+            .expect("session closed serializes");
+            send_text(tx, closed);
+        }
+        audit(
+            state,
+            AuditEvent {
+                machine_id: Some(machine_id.to_owned()),
+                session_id: Some(session.session_id),
+                request_id: Some(request_id.to_owned()),
+                result: Some("closed".to_owned()),
+                summary: Some("force reconnect".to_owned()),
+                ..AuditEvent::new("server", "session.closed")
+            },
+        );
+    }
 }
 
 async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMessage) {

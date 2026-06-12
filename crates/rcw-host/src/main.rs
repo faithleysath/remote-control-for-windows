@@ -10,6 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Result;
 use clap::Parser;
 use rcw_common::{config, ids::short_machine_id, totp};
+use tokio::sync::watch;
 use tracing::warn;
 
 use crate::{audit::append_host_audit, connection::run_host_connection};
@@ -62,14 +63,25 @@ async fn main() -> Result<()> {
 
     update_clipboard(&context);
     tokio::spawn(totp_refresher(context.clone()));
+    let (shutdown_tx, _) = watch::channel(false);
 
     loop {
+        let shutdown_rx = shutdown_tx.subscribe();
+        let mut connection = tokio::spawn(run_host_connection(
+            context.clone(),
+            ws_url.clone(),
+            shutdown_rx,
+        ));
         tokio::select! {
-            result = run_host_connection(context.clone(), ws_url.clone()) => {
+            result = &mut connection => {
                 match result {
-                    Ok(()) => println!("Connection: disconnected; reconnecting"),
-                    Err(err) => {
+                    Ok(Ok(())) => println!("Connection: disconnected; reconnecting"),
+                    Ok(Err(err)) => {
                         warn!("host connection failed: {err}");
+                        println!("Connection: reconnecting ({err})");
+                    }
+                    Err(err) => {
+                        warn!("host connection task failed: {err}");
                         println!("Connection: reconnecting ({err})");
                     }
                 }
@@ -78,6 +90,22 @@ async fn main() -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("Connection: stopping");
+                let _ = shutdown_tx.send(true);
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut connection).await {
+                    Ok(Ok(Ok(()))) => println!("Connection: disconnected"),
+                    Ok(Ok(Err(err))) => {
+                        warn!("host connection failed: {err}");
+                        println!("Connection: stop warning ({err})");
+                    }
+                    Ok(Err(err)) => {
+                        warn!("host connection task failed: {err}");
+                        println!("Connection: stop warning ({err})");
+                    }
+                    Err(_) => {
+                        connection.abort();
+                        println!("Connection: stop timed out; connection task aborted");
+                    }
+                }
                 break;
             }
         }

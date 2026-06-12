@@ -39,7 +39,7 @@ use crate::{
     },
     controller_config::ControllerConfig,
     output::write_output_file_checked,
-    session::{MemorySessionStore, SessionFile},
+    session::{MemorySessionStore, SessionFile, SessionStore},
 };
 
 #[derive(Debug, Clone)]
@@ -80,6 +80,7 @@ impl RcwMcpServer {
             &params.machine_id,
             &params.totp,
             params.totp_period_seconds,
+            params.force_reconnect,
         )
         .await;
         self.audit(&request_id, "mcp.connect", &result, started.elapsed(), None);
@@ -506,13 +507,47 @@ impl RcwMcpServer {
 }
 
 pub(crate) async fn run_mcp_server(cli: &Cli) -> Result<i32> {
-    let service = RcwMcpServer::new(ControllerConfig::from_cli(cli))
-        .serve(rmcp::transport::stdio())
-        .await?;
+    let server = RcwMcpServer::new(ControllerConfig::from_cli(cli));
+    let service = server.clone().serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
+    server.close_on_shutdown().await;
     Ok(0)
 }
 
 fn format_error(error: anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+impl RcwMcpServer {
+    async fn close_on_shutdown(&self) {
+        let has_session = match self.session.lock() {
+            Ok(session) => session.is_some(),
+            Err(_) => {
+                eprintln!("rcwctl mcp: memory session lock poisoned during shutdown");
+                false
+            }
+        };
+        if !has_session {
+            return;
+        }
+
+        let request_id = new_request_id();
+        let started = Instant::now();
+        let result = close_session_state(&self.config, &self.store(), &request_id).await;
+        self.audit(
+            &request_id,
+            "mcp.shutdown_disconnect",
+            &result,
+            started.elapsed(),
+            None,
+        );
+        if let Err(err) = result {
+            eprintln!("rcwctl mcp: failed to close session during shutdown: {err:#}");
+            if let Err(clear_err) = self.store().remove_session() {
+                eprintln!(
+                    "rcwctl mcp: failed to clear memory session during shutdown: {clear_err:#}"
+                );
+            }
+        }
+    }
 }

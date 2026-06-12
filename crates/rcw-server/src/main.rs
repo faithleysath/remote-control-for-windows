@@ -2,22 +2,23 @@ mod handlers;
 mod state;
 mod ws;
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{response::IntoResponse, routing::get, Json, Router};
 use rcw_common::{
     audit::{append_jsonl, AuditEvent},
     config,
-    protocol::PROTOCOL_VERSION,
+    protocol::{HostSessionClosedPayload, WireMessage, PROTOCOL_VERSION, TYPE_HOST_SESSION_CLOSED},
 };
 use serde_json::json;
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{
     handlers::{control_ws, host_ws},
     state::ServerState,
+    ws::send_text,
 };
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ async fn main() -> Result<()> {
         control_token: Arc::new(control_token),
         audit_path: Arc::new(audit_path),
     };
+    tokio::spawn(session_sweeper(state.clone()));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -71,5 +73,41 @@ async fn healthz() -> impl IntoResponse {
 pub(crate) fn audit(state: &AppState, event: AuditEvent) {
     if let Err(err) = append_jsonl(state.audit_path.as_ref(), &event) {
         error!("failed to write server audit log: {err}");
+    }
+}
+
+async fn session_sweeper(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        let removed_sessions = state.inner.prune_stale(std::time::Instant::now()).await;
+        for session in removed_sessions {
+            if let Some(host_tx) = state.inner.host_tx(&session.machine_id).await {
+                match WireMessage::new(
+                    TYPE_HOST_SESSION_CLOSED,
+                    None,
+                    Some(session.session_id.clone()),
+                    HostSessionClosedPayload {
+                        session_id: session.session_id.clone(),
+                        reason: "session_idle_timeout".to_owned(),
+                    },
+                ) {
+                    Ok(message) => {
+                        send_text(&host_tx, message);
+                    }
+                    Err(err) => warn!("failed to build session idle close message: {err}"),
+                }
+            }
+            audit(
+                &state,
+                AuditEvent {
+                    machine_id: Some(session.machine_id),
+                    session_id: Some(session.session_id),
+                    result: Some("closed".to_owned()),
+                    summary: Some("session idle timeout".to_owned()),
+                    ..AuditEvent::new("server", "session.closed")
+                },
+            );
+        }
     }
 }

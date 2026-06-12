@@ -109,6 +109,8 @@ pub struct ControlOpenPayload {
     pub machine_id: String,
     pub totp: String,
     pub totp_period_seconds: u64,
+    #[serde(default)]
+    pub force_reconnect: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

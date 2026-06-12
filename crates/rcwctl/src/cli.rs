@@ -33,6 +33,8 @@ pub(crate) enum Commands {
         totp: String,
         #[arg(long)]
         totp_period_seconds: Option<u64>,
+        #[arg(long)]
+        force: bool,
     },
     Status,
     Exec {

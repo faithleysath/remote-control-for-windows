@@ -75,6 +75,11 @@ rcwctl connect --id 8K4F-2M7Q --totp 183942
 
 成功后写入本地会话文件。
 同时写入控制端审计日志。
+如果服务端仍保留同一被控端的旧会话，而现场用户已经给出新的 TOTP，可以使用 `--force` 在 TOTP 验证通过后替换旧会话：
+
+```bash
+rcwctl connect --id 8K4F-2M7Q --totp 183942 --force
+```
 
 JSON 输出：
 
@@ -233,7 +238,7 @@ rcwctl --server ws://127.0.0.1:7800 --token "$RCW_CONTROL_TOKEN" mcp
 
 MCP 工具：
 
-- `connect`：用机器 ID 和当前 TOTP 打开远控会话。
+- `connect`：用机器 ID 和当前 TOTP 打开远控会话；可传 `force_reconnect=true` 在 TOTP 验证通过后替换旧会话。
 - `disconnect`：关闭当前远控会话。
 - `status`：查询当前会话和被控端在线状态。
 - `exec`：执行远程命令。
@@ -245,7 +250,7 @@ MCP 工具：
 - `mouse_move`、`mouse_click`、`mouse_scroll`：鼠标操作。
 - `keyboard_type`、`keyboard_key`：键盘输入。
 
-`mcp` 是长期运行进程。它把打开后的 session 和后台传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 `status=running` 和 `task_id`，之后调用 `transfer_status` 查询。`wait_timeout_ms=0` 表示立即转后台。MCP 进程退出后，内存中的 session 信息和任务状态也随之丢失；需要重新调用 `connect`。
+`mcp` 是长期运行进程。它把打开后的 session 和后台传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 `status=running` 和 `task_id`，之后调用 `transfer_status` 查询。`wait_timeout_ms=0` 表示立即转后台。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
 
 ## Codex 调用约定
 

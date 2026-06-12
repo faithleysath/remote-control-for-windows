@@ -118,6 +118,7 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         );
         return;
     };
+    state.inner.touch_session(&session_id).await;
     let Some(host_tx) = state.inner.host_tx(&machine_id).await else {
         send_error(
             tx,
@@ -211,7 +212,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     }
 
-    if state.inner.host_has_active_session(&open.machine_id).await {
+    if !open.force_reconnect && state.inner.host_has_active_session(&open.machine_id).await {
         send_error(
             tx,
             request_id,
@@ -241,6 +242,8 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
                 machine_id: open.machine_id.clone(),
                 controller_tx: tx.clone(),
                 controller_label: controller_label.clone(),
+                force_reconnect: open.force_reconnect,
+                created_at: std::time::Instant::now(),
             },
         )
         .await;

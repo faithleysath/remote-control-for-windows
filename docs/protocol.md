@@ -79,13 +79,15 @@
     "control_token": "...",
     "machine_id": "8K4F-2M7Q",
     "totp": "183942",
-    "totp_period_seconds": 120
+    "totp_period_seconds": 120,
+    "force_reconnect": false
   }
 }
 ```
 
 服务端先验证 `control_token`，再向主机转发认证请求。
 `totp_period_seconds` 必须与主机登记值一致；不一致时返回 `invalid_totp_period`，避免控制端和被控端使用不同验证码周期造成误判。
+`force_reconnect` 默认为 `false`。设置为 `true` 时，服务端仍会先让被控端验证当前 TOTP；只有验证通过后才会关闭同一 `machine_id` 的旧 session 并创建新 session。
 
 ### host.auth_request
 
@@ -159,6 +161,8 @@
   }
 }
 ```
+
+服务端会刷新有效 session 的最近使用时间。空闲超过服务端保留时间的 session 会被后台清理，并向在线 host 发送 `host.session_closed`。
 
 ### command.request
 

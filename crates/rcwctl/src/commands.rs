@@ -114,6 +114,7 @@ pub(crate) async fn open_session(
     machine_id: &str,
     totp: &str,
     explicit_period: Option<u64>,
+    force_reconnect: bool,
 ) -> Result<i32> {
     let config = ControllerConfig::from_cli(cli);
     let result = open_session_state(
@@ -123,6 +124,7 @@ pub(crate) async fn open_session(
         machine_id,
         totp,
         explicit_period,
+        force_reconnect,
     )
     .await?;
 
@@ -145,6 +147,7 @@ pub(crate) async fn open_session_state(
     machine_id: &str,
     totp: &str,
     explicit_period: Option<u64>,
+    force_reconnect: bool,
 ) -> Result<OpenSessionResult> {
     let opened = ControlClient::new(config, store)
         .open_session(
@@ -152,6 +155,7 @@ pub(crate) async fn open_session_state(
             machine_id,
             totp,
             explicit_period,
+            force_reconnect,
             config_wait_timeout(config)?,
         )
         .await?;

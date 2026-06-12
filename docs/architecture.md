@@ -170,6 +170,7 @@ remote-control-for-windows/
 ## 并发模型
 
 - 当前基线中，一个被控端同一时间只允许一个 active session。
+- 控制端可以在重新验证当前 TOTP 后使用 force reconnect 替换同一被控端的旧 session。
 - 同一 session 内命令默认串行执行，避免鼠标键盘和截图状态混乱。
 - 当前基线中，文件传输作为长命令处理，不与其他命令并发执行。
 - 后续可以扩展为命令执行并发、输入类命令串行。
@@ -177,7 +178,9 @@ remote-control-for-windows/
 ## 失败处理
 
 - 被控端断开：服务端注销主机并使相关 session 失效。
-- 控制端断开：session 可以短时间保留，便于 CLI 多子命令复用。
+- 控制端断开：session 可以短时间保留，便于 CLI 多子命令复用；后台清理器会回收长期空闲 session、过期 pending open、过期请求路由和空的限流 key。
+- MCP 正常退出：控制端尽力发送 `session.close`；崩溃或强杀时依赖 force reconnect 或服务端空闲清理兜底。
+- 被控端 Ctrl-C 退出：host 尽力发送 WebSocket close，服务端观察到断开后清理 host 和相关 session。
 - 服务端重启：所有主机和 session 失效，需要重新连接和认证。
 - 命令超时：被控端尝试终止子进程并返回 timeout。
 - 文件校验失败：控制端返回失败并提示重试。

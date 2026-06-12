@@ -143,6 +143,7 @@ impl<'a> ControlClient<'a> {
         machine_id: &str,
         totp: &str,
         explicit_period: Option<u64>,
+        force_reconnect: bool,
         wait: Duration,
     ) -> Result<OpenedSession> {
         let server = config::resolve_server_url(self.config.server.as_deref())?;
@@ -158,6 +159,7 @@ impl<'a> ControlClient<'a> {
                 machine_id: machine_id.to_owned(),
                 totp: totp.to_owned(),
                 totp_period_seconds: period,
+                force_reconnect,
             },
         )?;
         let messages = send_and_collect(

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use rcw_common::{
     ids::short_machine_id,
     protocol::{
@@ -12,6 +12,7 @@ use rcw_common::{
     },
     totp,
 };
+use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::warn;
 
@@ -27,7 +28,11 @@ use crate::{
     HostContext,
 };
 
-pub(crate) async fn run_host_connection(context: Arc<HostContext>, ws_url: String) -> Result<()> {
+pub(crate) async fn run_host_connection(
+    context: Arc<HostContext>,
+    ws_url: String,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     let (ws, _) = connect_async(ws_url)
         .await
         .context("failed to connect to rcw-server host websocket")?;
@@ -99,6 +104,12 @@ pub(crate) async fn run_host_connection(context: Arc<HostContext>, ws_url: Strin
             }
             _ = upload_sweep.tick() => {
                 prune_idle_uploads(&mut uploads);
+            }
+            changed = shutdown.changed() => {
+                if changed.is_ok() && *shutdown.borrow() {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
             }
         }
     }
