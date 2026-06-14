@@ -190,10 +190,46 @@ jobs:
           cd dist/release
           sha256sum *.tar.gz *.zip > checksums.txt
           cat checksums.txt
+      - name: Generate release notes
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          notes_file="dist/release/RELEASE_NOTES.md"
+          awk -v version="$version" '
+            /^## / {
+              heading = $0
+              sub(/^## /, "", heading)
+              if (in_section) {
+                exit
+              }
+              if (heading == version || index(heading, version " ") == 1) {
+                in_section = 1
+                found = 1
+                print
+                next
+              }
+            }
+            in_section {
+              print
+            }
+            END {
+              if (!found) {
+                exit 42
+              }
+            }
+          ' CHANGELOG.md > "$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            echo "No changelog section found for $RELEASE_TAG" >&2
+            exit 1
+          fi
+          cat "$notes_file"
       - name: Create GitHub release
         run: |
           set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --notes-file dist/release/RELEASE_NOTES.md
             gh release upload "$RELEASE_TAG" \
               dist/release/*.tar.gz \
               dist/release/*.zip \
@@ -206,7 +242,7 @@ jobs:
               dist/release/checksums.txt \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_TAG" \
-              --notes "Automated release for $RELEASE_TAG."
+              --notes-file dist/release/RELEASE_NOTES.md
           fi
 
   publish-npm:
