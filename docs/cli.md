@@ -31,7 +31,6 @@ rcwctl [GLOBAL_OPTIONS] <COMMAND>
 - `--token <token>`：覆盖控制端 token。默认读取 `RCW_CONTROL_TOKEN`。
 - `--session <path>`：指定本地会话文件。
 - `--json`：输出 JSON。
-- `--timeout <duration>`：控制端等待超时。
 - `--audit-label <text>`：为本次操作写入一段简短审计说明。
 - `-v, --verbose`：输出调试信息。
 
@@ -115,7 +114,8 @@ rcwctl exec --timeout 120s -- cmd /c dir C:\
 
 - `--` 后面的内容原样作为远程进程参数。
 - 默认工作目录为被控端进程当前目录。
-- 默认超时 30 秒。
+- 不传 `exec --timeout` 时，远端进程不设运行上限，CLI 会一直等到远端返回完成、连接断开或用户中断。
+- `exec --timeout <duration>` 是远端进程运行上限；CLI 会等待到覆盖这个上限，避免命令还在跑就被客户端超时截断。
 - 返回远程退出码，但 CLI 本身在传输失败时返回自己的非 0 退出码。
 - 审计日志记录命令参数摘要、退出码和耗时；不默认记录完整 stdout/stderr。
 
@@ -241,16 +241,19 @@ MCP 工具：
 - `connect`：用机器 ID 和当前 TOTP 打开远控会话；可传 `force_reconnect=true` 在 TOTP 验证通过后替换旧会话。
 - `disconnect`：关闭当前远控会话。
 - `status`：查询当前会话和被控端在线状态。
-- `exec`：执行远程命令。
+- `exec`：执行远程命令。可传 `timeout_ms` 限制远端进程运行时长；可传 `wait_timeout_ms` 限制本次 MCP tool call 等待多久，`0` 表示立即返回后台 `task_id`。
+- `exec_status`：查询后台 exec 任务状态、最终 stdout/stderr/exit_code 或错误；stdout 和 stderr 各最多保留 1 MiB，超出时通过 `stdout_truncated` / `stderr_truncated` 标记。
+- `exec_cancel`：取消后台 exec 任务，并要求被控端杀掉对应远端进程。
 - `upload`：流式读取 MCP 服务器本机路径并上传到远端路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
 - `download`：下载远端文件并流式写入 MCP 服务器本机路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
 - `transfer_status`：查询后台上传或下载任务的运行状态、最终结果或错误。
+- `transfer_cancel`：取消后台上传或下载任务；上传如果还在 MCP 本机 hash/校验阶段会直接本地取消，已经发到远端后会通知 host 丢弃临时上传状态；下载会通知 host 停止远端分块发送，同时中止本地写入并清理本地临时文件。
 - `screenshot`：截图并写入 MCP 服务器本机路径。
 - `windows`：列出窗口。
 - `mouse_move`、`mouse_click`、`mouse_scroll`：鼠标操作。
 - `keyboard_type`、`keyboard_key`：键盘输入。
 
-`mcp` 是长期运行进程。它把打开后的 session 和后台传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 `status=running` 和 `task_id`，之后调用 `transfer_status` 查询。`wait_timeout_ms=0` 表示立即转后台。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
+`mcp` 是长期运行进程。它把打开后的 session 和后台任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；`exec` 默认最多等待 30 秒；如果任务未完成，会返回 `status=running` 和 `task_id`，之后调用对应 status 工具查询。`wait_timeout_ms=0` 表示立即转后台。后台任务可以通过对应 cancel 工具取消；已发到远端的请求只有在 server 返回 `command.cancel_result` 后，本地状态才会变为 `cancelled`。如果 server 未确认取消或返回 `error`，MCP 会返回错误并保留原任务状态；还没发到远端的本地预处理阶段可以直接本地取消。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
 
 ## Codex 调用约定
 
@@ -267,5 +270,5 @@ rcwctl --json ...
 3. `click` 或 `type`
 4. 再次 `screenshot` 验证
 
-所有命令都必须避免进入无法退出的交互式程序。需要长时间命令时显式设置 `--timeout`。
+所有命令都必须避免进入无法退出的交互式程序。需要长时间命令时，对 CLI 显式设置 `exec --timeout`，对 MCP 使用 `exec.timeout_ms` 和 `exec.wait_timeout_ms` 表达远端运行上限与本次调用等待窗口。
 必要时使用 `--audit-label` 写明本次操作目的，例如 `--audit-label "collect customer app logs"`。

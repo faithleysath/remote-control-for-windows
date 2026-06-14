@@ -14,8 +14,6 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub(crate) json: bool,
     #[arg(long, global = true)]
-    pub(crate) timeout: Option<String>,
-    #[arg(long, global = true)]
     pub(crate) audit_label: Option<String>,
     #[arg(short, long, global = true)]
     pub(crate) verbose: bool,
@@ -38,6 +36,8 @@ pub(crate) enum Commands {
     },
     Status,
     Exec {
+        #[arg(long)]
+        timeout: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
@@ -135,5 +135,24 @@ mod tests {
             cli.command,
             Commands::Click { x: -20, y: -10, .. }
         ));
+    }
+
+    #[test]
+    fn rejects_global_timeout_flag() {
+        let err = Cli::try_parse_from(["rcwctl", "--timeout", "5m", "status"]).unwrap_err();
+        assert!(err.to_string().contains("unexpected argument"));
+    }
+
+    #[test]
+    fn parses_exec_timeout_as_subcommand_option() {
+        let cli =
+            Cli::try_parse_from(["rcwctl", "exec", "--timeout", "5m", "--", "cmd.exe"]).unwrap();
+        match cli.command {
+            Commands::Exec { timeout, command } => {
+                assert_eq!(timeout.as_deref(), Some("5m"));
+                assert_eq!(command, vec!["cmd.exe"]);
+            }
+            _ => panic!("expected exec command"),
+        }
     }
 }

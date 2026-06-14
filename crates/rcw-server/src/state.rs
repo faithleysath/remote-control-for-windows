@@ -187,6 +187,11 @@ impl ServerState {
         routes.remove(request_id);
     }
 
+    pub(crate) async fn clear_request_routes_for_controller(&self, tx: &Tx) {
+        let mut routes = self.request_routes.lock().await;
+        routes.retain(|_, route| !route.controller_tx.same_channel(tx));
+    }
+
     pub(crate) async fn request_session_id(&self, request_id: &str) -> Option<String> {
         let routes = self.request_routes.lock().await;
         routes.get(request_id).map(|route| route.session_id.clone())

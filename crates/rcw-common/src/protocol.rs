@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 
 use crate::RcwResult;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 pub const TYPE_HOST_HELLO: &str = "host.hello";
 pub const TYPE_HOST_HELLO_ACK: &str = "host.hello_ack";
@@ -20,6 +20,8 @@ pub const TYPE_SESSION_CLOSE_RESULT: &str = "session.close_result";
 pub const TYPE_COMMAND_REQUEST: &str = "command.request";
 pub const TYPE_COMMAND_OUTPUT: &str = "command.output";
 pub const TYPE_COMMAND_COMPLETE: &str = "command.complete";
+pub const TYPE_COMMAND_CANCEL: &str = "command.cancel";
+pub const TYPE_COMMAND_CANCEL_RESULT: &str = "command.cancel_result";
 pub const TYPE_UPLOAD_COMPLETE: &str = "upload.complete";
 pub const TYPE_DOWNLOAD_COMPLETE: &str = "download.complete";
 pub const TYPE_ERROR: &str = "error";
@@ -209,13 +211,24 @@ pub struct ErrorPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandCancelPayload {
+    pub session_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandCancelResultPayload {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecArgs {
     pub program: String,
     #[serde(default)]
     pub argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +313,7 @@ pub enum ErrorCode {
     InvalidPath,
     ChecksumMismatch,
     PermissionDenied,
+    Cancelled,
     InternalError,
 }
 
@@ -319,6 +333,7 @@ impl ErrorCode {
             ErrorCode::InvalidPath => "path is invalid",
             ErrorCode::ChecksumMismatch => "checksum mismatch",
             ErrorCode::PermissionDenied => "permission denied",
+            ErrorCode::Cancelled => "request cancelled",
             ErrorCode::InternalError => "internal error",
         }
     }
@@ -345,5 +360,48 @@ mod tests {
         let decoded: WireMessage = serde_json::from_str(&encoded).unwrap();
         let payload: SessionStatusPayload = decoded.payload_as().unwrap();
         assert_eq!(payload.session_token, "secret");
+    }
+
+    #[test]
+    fn exec_args_accept_missing_timeout() {
+        let args: ExecArgs = serde_json::from_value(json!({
+            "program": "cmd.exe",
+            "argv": ["/c", "echo ok"]
+        }))
+        .unwrap();
+
+        assert_eq!(args.program, "cmd.exe");
+        assert_eq!(args.timeout_ms, None);
+    }
+
+    #[test]
+    fn protocol_version_marks_cancel_payload_change() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
+    #[test]
+    fn command_cancel_payload_requires_session_token() {
+        let missing = serde_json::from_value::<CommandCancelPayload>(json!({}));
+        assert!(missing.is_err());
+
+        let payload = serde_json::from_value::<CommandCancelPayload>(json!({
+            "session_token": "secret"
+        }))
+        .unwrap();
+        assert_eq!(payload.session_token, "secret");
+    }
+
+    #[test]
+    fn command_cancel_result_round_trips() {
+        let message = WireMessage::new(
+            TYPE_COMMAND_CANCEL_RESULT,
+            Some("req".to_owned()),
+            Some("sess".to_owned()),
+            CommandCancelResultPayload { ok: true },
+        )
+        .unwrap();
+
+        let payload: CommandCancelResultPayload = message.payload_as().unwrap();
+        assert!(payload.ok);
     }
 }

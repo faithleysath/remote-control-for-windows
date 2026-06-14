@@ -26,6 +26,7 @@ struct Args {
     audit_log: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 pub(crate) struct HostContext {
     pub(crate) server_url: String,
     pub(crate) machine_id: String,

@@ -1,4 +1,4 @@
-use std::{fs, path::Path, time::Duration};
+use std::{fs, io::Read, path::Path, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use rcw_common::{
@@ -6,19 +6,50 @@ use rcw_common::{
         ExecArgs, ScreenshotArgs, UploadArgs, WindowInfo, COMMAND_EXEC, COMMAND_SCREENSHOT,
         COMMAND_WINDOWS,
     },
-    transfer::{commit_temp_output_file, create_temp_output_file, sha256_file, temp_output_path},
+    transfer::{
+        commit_temp_output_file, create_temp_output_file, sha256_file, temp_output_path,
+        Sha256Accumulator, CHUNK_SIZE,
+    },
 };
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
+    cancel::{bail_if_cancelled, CancelFlag},
     cli::Cli,
-    controller_config::{config_wait_timeout, ControllerConfig},
+    controller_config::{config_wait_timeout, parse_duration, ControllerConfig},
     output::{print_json, write_output_file},
     session::{FileSessionStore, SessionFile, SessionStore},
     transport::ControlClient,
 };
+
+pub(crate) type RemoteStartHook = Box<dyn FnOnce() + Send + 'static>;
+
+pub(crate) struct ExecCommandOptions {
+    pub(crate) cwd: Option<String>,
+    pub(crate) timeout_ms: Option<u64>,
+    pub(crate) response_wait: Option<Duration>,
+    pub(crate) cancel: Option<CancelFlag>,
+    pub(crate) on_remote_start: Option<RemoteStartHook>,
+}
+
+pub(crate) struct UploadPathOptions<'a> {
+    pub(crate) local: &'a Path,
+    pub(crate) remote: &'a str,
+    pub(crate) overwrite: bool,
+    pub(crate) expected_sha256: Option<String>,
+    pub(crate) cancel: Option<CancelFlag>,
+    pub(crate) on_remote_start: Option<RemoteStartHook>,
+}
+
+pub(crate) struct DownloadFileOptions<'a> {
+    pub(crate) remote: &'a str,
+    pub(crate) local: &'a Path,
+    pub(crate) overwrite: bool,
+    pub(crate) cancel: Option<CancelFlag>,
+    pub(crate) on_remote_start: Option<RemoteStartHook>,
+}
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct OpenSessionResult {
@@ -45,12 +76,14 @@ pub(crate) struct CloseResult {
     pub(crate) request_id: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub(crate) struct ExecResult {
     pub(crate) ok: bool,
     pub(crate) exit_code: Option<i32>,
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
     pub(crate) duration_ms: u64,
     pub(crate) request_id: String,
 }
@@ -253,10 +286,33 @@ pub(crate) async fn close_session_state(
     })
 }
 
-pub(crate) async fn exec_command(cli: &Cli, request_id: &str, command: &[String]) -> Result<i32> {
+pub(crate) async fn exec_command(
+    cli: &Cli,
+    request_id: &str,
+    command: &[String],
+    timeout: Option<&str>,
+) -> Result<i32> {
     let config = ControllerConfig::from_cli(cli);
     let store = FileSessionStore::new(cli);
-    let result = exec_command_state(&config, &store, request_id, command, None).await?;
+    let remote_timeout_ms = match timeout {
+        Some(value) => Some(duration_to_millis(parse_duration(value)?)),
+        None => None,
+    };
+    let response_wait = exec_response_wait(remote_timeout_ms)?;
+    let result = exec_command_state(
+        &config,
+        &store,
+        request_id,
+        command,
+        ExecCommandOptions {
+            cwd: None,
+            timeout_ms: remote_timeout_ms,
+            response_wait,
+            cancel: None,
+            on_remote_start: None,
+        },
+    )
+    .await?;
 
     if cli.json {
         print_json(serde_json::to_value(&result)?)?;
@@ -273,35 +329,78 @@ pub(crate) async fn exec_command_state(
     store: &dyn SessionStore,
     request_id: &str,
     command: &[String],
-    cwd: Option<String>,
+    options: ExecCommandOptions,
 ) -> Result<ExecResult> {
+    let ExecCommandOptions {
+        cwd,
+        timeout_ms,
+        response_wait,
+        cancel,
+        on_remote_start,
+    } = options;
     if command.is_empty() {
         bail!("exec requires a program");
     }
-    let wait = config_wait_timeout(config)?;
-    let remote_timeout_ms = wait.as_millis().min(u64::MAX as u128) as u64;
-    let response = ControlClient::new(config, store)
-        .command(
-            request_id,
-            COMMAND_EXEC,
-            json!(ExecArgs {
-                program: command[0].clone(),
-                argv: command[1..].to_vec(),
-                cwd,
-                timeout_ms: remote_timeout_ms,
-            }),
-            wait + Duration::from_secs(10),
-        )
-        .await?;
+    bail_if_cancelled(cancel.as_ref())?;
+    let args = json!(ExecArgs {
+        program: command[0].clone(),
+        argv: command[1..].to_vec(),
+        cwd,
+        timeout_ms,
+    });
+    let client = ControlClient::new(config, store);
+    let response = match response_wait {
+        Some(wait) => {
+            client
+                .command(
+                    request_id,
+                    COMMAND_EXEC,
+                    args,
+                    wait,
+                    cancel.clone(),
+                    on_remote_start,
+                )
+                .await?
+        }
+        None => {
+            client
+                .command_without_response_timeout(
+                    request_id,
+                    COMMAND_EXEC,
+                    args,
+                    cancel.clone(),
+                    on_remote_start,
+                )
+                .await?
+        }
+    };
     let complete = response.complete.context("missing command.complete")?;
     Ok(ExecResult {
         ok: complete.ok,
         exit_code: complete.exit_code,
         stdout: response.stdout,
         stderr: response.stderr,
+        stdout_truncated: response.stdout_truncated,
+        stderr_truncated: response.stderr_truncated,
         duration_ms: complete.duration_ms,
         request_id: request_id.to_owned(),
     })
+}
+
+pub(crate) fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn exec_response_wait(remote_timeout_ms: Option<u64>) -> Result<Option<Duration>> {
+    match remote_timeout_ms {
+        Some(timeout_ms) => {
+            let remote = Duration::from_millis(timeout_ms)
+                .checked_add(Duration::from_secs(10))
+                .context("exec timeout is too large")?;
+            Ok(Some(remote))
+        }
+        None => Ok(None),
+    }
 }
 
 pub(crate) async fn upload_file(
@@ -318,10 +417,14 @@ pub(crate) async fn upload_file(
         &config,
         &store,
         request_id,
-        local,
-        remote,
-        overwrite,
-        expected_sha256.map(ToOwned::to_owned),
+        UploadPathOptions {
+            local,
+            remote,
+            overwrite,
+            expected_sha256: expected_sha256.map(ToOwned::to_owned),
+            cancel: None,
+            on_remote_start: None,
+        },
     )
     .await?;
 
@@ -341,17 +444,23 @@ pub(crate) async fn upload_path_state(
     config: &ControllerConfig,
     store: &dyn SessionStore,
     request_id: &str,
-    local: &Path,
-    remote: &str,
-    overwrite: bool,
-    expected_sha256: Option<String>,
+    options: UploadPathOptions<'_>,
 ) -> Result<UploadResult> {
-    let (size, actual) = file_metadata_and_sha256(local).await?;
+    let UploadPathOptions {
+        local,
+        remote,
+        overwrite,
+        expected_sha256,
+        cancel,
+        on_remote_start,
+    } = options;
+    let (size, actual) = file_metadata_and_sha256(local, cancel.clone()).await?;
     if let Some(expected) = expected_sha256.as_deref() {
         if expected != actual {
             bail!("local sha256 mismatch: expected {expected}, calculated {actual}");
         }
     }
+    bail_if_cancelled(cancel.as_ref())?;
     let response = ControlClient::new(config, store)
         .upload_file(
             request_id,
@@ -363,6 +472,8 @@ pub(crate) async fn upload_path_state(
                 size,
             },
             config_wait_timeout(config)?,
+            cancel.clone(),
+            on_remote_start,
         )
         .await?;
     let complete = response.complete.context("missing command.complete")?;
@@ -375,14 +486,31 @@ pub(crate) async fn upload_path_state(
     })
 }
 
-async fn file_metadata_and_sha256(path: &Path) -> Result<(u64, String)> {
+async fn file_metadata_and_sha256(
+    path: &Path,
+    cancel: Option<CancelFlag>,
+) -> Result<(u64, String)> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let size = fs::metadata(&path)
             .with_context(|| format!("failed to stat {}", path.display()))?
             .len();
-        let sha256 =
-            sha256_file(&path).with_context(|| format!("failed to hash {}", path.display()))?;
+        bail_if_cancelled(cancel.as_ref())?;
+        let mut file =
+            fs::File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mut hasher = Sha256Accumulator::new();
+        let mut buffer = vec![0_u8; CHUNK_SIZE];
+        loop {
+            bail_if_cancelled(cancel.as_ref())?;
+            let read = file
+                .read(&mut buffer)
+                .with_context(|| format!("failed to read {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let sha256 = hasher.finalize();
         Ok((size, sha256))
     })
     .await
@@ -397,7 +525,19 @@ pub(crate) async fn download_file(
 ) -> Result<i32> {
     let config = ControllerConfig::from_cli(cli);
     let store = FileSessionStore::new(cli);
-    let result = download_file_state(&config, &store, request_id, remote, local, true).await?;
+    let result = download_file_state(
+        &config,
+        &store,
+        request_id,
+        DownloadFileOptions {
+            remote,
+            local,
+            overwrite: true,
+            cancel: None,
+            on_remote_start: None,
+        },
+    )
+    .await?;
 
     if cli.json {
         print_json(json!({
@@ -422,16 +562,29 @@ pub(crate) async fn download_file_state(
     config: &ControllerConfig,
     store: &dyn SessionStore,
     request_id: &str,
-    remote: &str,
-    local: &Path,
-    overwrite: bool,
+    options: DownloadFileOptions<'_>,
 ) -> Result<DownloadResult> {
+    let DownloadFileOptions {
+        remote,
+        local,
+        overwrite,
+        cancel,
+        on_remote_start,
+    } = options;
     let temp_path = temp_output_path(local, request_id);
     let result = async {
+        bail_if_cancelled(cancel.as_ref())?;
         let output =
             tokio::fs::File::from_std(create_temp_output_file(local, &temp_path, overwrite)?);
         let response = ControlClient::new(config, store)
-            .download_to_file(request_id, remote, output, config_wait_timeout(config)?)
+            .download_to_file(
+                request_id,
+                remote,
+                output,
+                config_wait_timeout(config)?,
+                cancel.clone(),
+                on_remote_start,
+            )
             .await?;
         if let Some(expected) = response.complete.size {
             if response.bytes_written != expected {
@@ -514,6 +667,8 @@ pub(crate) async fn screenshot_state(
                 format: format.to_owned(),
             }),
             config_wait_timeout(config)?,
+            None,
+            None,
         )
         .await?;
     let complete = response.complete.context("missing command.complete")?;
@@ -557,6 +712,8 @@ pub(crate) async fn windows_state(
             COMMAND_WINDOWS,
             json!({}),
             config_wait_timeout(config)?,
+            None,
+            None,
         )
         .await?;
     let complete = response.complete.context("missing command.complete")?;
@@ -597,7 +754,14 @@ pub(crate) async fn simple_command_state(
     args: Value,
 ) -> Result<SimpleResult> {
     let response = ControlClient::new(config, store)
-        .command(request_id, command, args, config_wait_timeout(config)?)
+        .command(
+            request_id,
+            command,
+            args,
+            config_wait_timeout(config)?,
+            None,
+            None,
+        )
         .await?;
     let complete = response.complete.context("missing command.complete")?;
     Ok(SimpleResult {
@@ -605,4 +769,23 @@ pub(crate) async fn simple_command_state(
         summary: complete.summary,
         request_id: request_id.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::exec_response_wait;
+
+    #[test]
+    fn exec_response_wait_is_unbounded_without_remote_timeout() {
+        let wait = exec_response_wait(None).unwrap();
+        assert_eq!(wait, None);
+    }
+
+    #[test]
+    fn exec_response_wait_tracks_remote_timeout() {
+        let wait = exec_response_wait(Some(120_000)).unwrap();
+        assert_eq!(wait, Some(Duration::from_secs(130)));
+    }
 }

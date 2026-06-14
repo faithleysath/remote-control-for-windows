@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use rcw_common::{
     ids::short_machine_id,
     protocol::{
         CommandRequestPayload, ErrorCode, HostAuthResultPayload, HostHelloPayload,
         HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage, COMMAND_UPLOAD_BEGIN,
-        PROTOCOL_VERSION, TYPE_COMMAND_REQUEST, TYPE_HOST_AUTH_REQUEST, TYPE_HOST_AUTH_RESULT,
-        TYPE_HOST_HELLO, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
+        PROTOCOL_VERSION, TYPE_COMMAND_CANCEL, TYPE_COMMAND_REQUEST, TYPE_HOST_AUTH_REQUEST,
+        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
     },
     totp,
 };
@@ -18,8 +18,8 @@ use tracing::warn;
 
 use crate::{
     audit::append_host_audit,
-    commands::execute_command,
-    output::{send_error, send_json, WsSink},
+    commands::{cancel_command_task, execute_command, prune_finished_command_tasks, CommandTasks},
+    output::{close_shared_sink, send_error, send_json, shared_sink, SharedWsSink},
     platform,
     upload::{
         begin_upload, handle_binary_frame, prune_idle_uploads, remove_uploads_for_session,
@@ -36,33 +36,35 @@ pub(crate) async fn run_host_connection(
     let (ws, _) = connect_async(ws_url)
         .await
         .context("failed to connect to rcw-server host websocket")?;
-    let (mut sink, mut stream) = ws.split();
+    let (sink, mut stream) = ws.split();
+    let sink = shared_sink(sink);
 
-    send_json(
-        &mut sink,
-        WireMessage::new(
-            TYPE_HOST_HELLO,
-            None,
-            None,
-            HostHelloPayload {
-                protocol_version: PROTOCOL_VERSION,
-                host_version: env!("CARGO_PKG_VERSION").to_owned(),
-                machine_id: context.machine_id.clone(),
-                totp_period_seconds: context.totp_period_seconds,
-                os: std::env::consts::OS.to_owned(),
-                hostname_hash: short_machine_id(
-                    hostname::get()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .as_bytes(),
-                ),
-            },
-        )?,
-    )
-    .await?;
+    let hello = WireMessage::new(
+        TYPE_HOST_HELLO,
+        None,
+        None,
+        HostHelloPayload {
+            protocol_version: PROTOCOL_VERSION,
+            host_version: env!("CARGO_PKG_VERSION").to_owned(),
+            machine_id: context.machine_id.clone(),
+            totp_period_seconds: context.totp_period_seconds,
+            os: std::env::consts::OS.to_owned(),
+            hostname_hash: short_machine_id(
+                hostname::get()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_bytes(),
+            ),
+        },
+    )?;
+    {
+        let mut sink = sink.lock().await;
+        send_json(&mut sink, hello).await?;
+    }
 
     let mut active_session: Option<String> = None;
     let mut uploads: HashMap<String, UploadState> = HashMap::new();
+    let mut command_tasks = CommandTasks::new();
     let mut upload_sweep = tokio::time::interval(UPLOAD_SWEEP_INTERVAL);
     println!("Connection: connected");
     append_host_audit(&context, "host.connected", None, None, None, Some("ok"));
@@ -84,14 +86,16 @@ pub(crate) async fn run_host_connection(
                         };
                         handle_server_message(
                             &context,
-                            &mut sink,
+                            &sink,
                             &mut active_session,
                             &mut uploads,
+                            &mut command_tasks,
                             message,
                         )
                         .await?;
                     }
                     Ok(Message::Binary(bytes)) => {
+                        let mut sink = sink.lock().await;
                         handle_binary_frame(&context, &mut sink, &mut uploads, bytes).await?;
                     }
                     Ok(Message::Close(_)) => break,
@@ -104,10 +108,12 @@ pub(crate) async fn run_host_connection(
             }
             _ = upload_sweep.tick() => {
                 prune_idle_uploads(&mut uploads);
+                prune_finished_command_tasks(&mut command_tasks);
             }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    let _ = sink.send(Message::Close(None)).await;
+                    abort_command_tasks(&mut command_tasks);
+                    close_shared_sink(&sink).await;
                     break;
                 }
             }
@@ -128,9 +134,10 @@ pub(crate) async fn run_host_connection(
 
 async fn handle_server_message(
     context: &HostContext,
-    sink: &mut WsSink,
+    sink: &SharedWsSink,
     active_session: &mut Option<String>,
     uploads: &mut HashMap<String, UploadState>,
+    command_tasks: &mut CommandTasks,
     message: WireMessage,
 ) -> Result<()> {
     match message.kind.as_str() {
@@ -154,16 +161,16 @@ async fn handle_server_message(
                 code: (!ok).then_some(ErrorCode::InvalidTotp),
                 message: (!ok).then(|| ErrorCode::InvalidTotp.message().to_owned()),
             };
-            send_json(
-                sink,
-                WireMessage::new(
-                    TYPE_HOST_AUTH_RESULT,
-                    Some(request_id.clone()),
-                    None,
-                    result,
-                )?,
-            )
-            .await?;
+            let auth_result = WireMessage::new(
+                TYPE_HOST_AUTH_RESULT,
+                Some(request_id.clone()),
+                None,
+                result,
+            )?;
+            {
+                let mut sink = sink.lock().await;
+                send_json(&mut sink, auth_result).await?;
+            }
             append_host_audit(
                 context,
                 "session.auth",
@@ -193,6 +200,7 @@ async fn handle_server_message(
             println!("Session: closed ({})", payload.reason);
             *active_session = None;
             remove_uploads_for_session(uploads, &session_id);
+            cancel_command_tasks_for_session(command_tasks, &session_id);
             append_host_audit(
                 context,
                 "session.closed",
@@ -206,8 +214,9 @@ async fn handle_server_message(
             let payload: CommandRequestPayload = message.payload_as()?;
             if payload.command == COMMAND_UPLOAD_BEGIN {
                 if let Err(err) = begin_upload(context, uploads, message.clone(), payload) {
+                    let mut sink = sink.lock().await;
                     send_error(
-                        sink,
+                        &mut sink,
                         message.request_id,
                         message.session_id,
                         ErrorCode::InvalidPath,
@@ -216,12 +225,37 @@ async fn handle_server_message(
                     .await?;
                 }
             } else {
-                execute_command(context, sink, message, payload).await?;
+                execute_command(context, sink, command_tasks, message, payload).await?;
             }
+        }
+        TYPE_COMMAND_CANCEL => {
+            if let Some(request_id) = &message.request_id {
+                uploads.remove(request_id);
+            }
+            cancel_command_task(context, sink, command_tasks, message).await?;
         }
         other => {
             warn!("ignored server message type {other}");
         }
     }
     Ok(())
+}
+
+fn abort_command_tasks(command_tasks: &mut CommandTasks) {
+    for (_, task) in command_tasks.drain() {
+        task.abort();
+    }
+}
+
+fn cancel_command_tasks_for_session(command_tasks: &mut CommandTasks, session_id: &str) {
+    let request_ids = command_tasks
+        .iter()
+        .filter(|(_, task)| task.session_id.as_deref() == Some(session_id))
+        .map(|(request_id, _)| request_id.clone())
+        .collect::<Vec<_>>();
+    for request_id in request_ids {
+        if let Some(task) = command_tasks.remove(&request_id) {
+            task.abort();
+        }
+    }
 }

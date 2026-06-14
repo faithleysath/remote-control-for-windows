@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::SinkExt;
@@ -7,13 +7,19 @@ use rcw_common::{
         CommandCompletePayload, CommandOutputPayload, ErrorCode, ErrorPayload, WireMessage,
         TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_ERROR,
     },
-    transfer::{chunk_binary, BinaryKind, FileBinaryFrameReader},
+    transfer::{chunk_binary, BinaryKind},
 };
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio_tungstenite::{tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 pub(crate) type WsSink =
     futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+pub(crate) type SharedWsSink = Arc<Mutex<WsSink>>;
+
+pub(crate) fn shared_sink(sink: WsSink) -> SharedWsSink {
+    Arc::new(Mutex::new(sink))
+}
 
 pub(crate) async fn send_binary_chunks(
     sink: &mut WsSink,
@@ -25,20 +31,6 @@ pub(crate) async fn send_binary_chunks(
         sink.send(Message::Binary(frame)).await?;
     }
     Ok(())
-}
-
-pub(crate) async fn send_file_binary_chunks(
-    sink: &mut WsSink,
-    request_id: &str,
-    kind: BinaryKind,
-    path: &Path,
-    size: u64,
-) -> Result<String> {
-    let mut reader = FileBinaryFrameReader::new(path, size, request_id, kind)?;
-    while let Some(frame) = reader.next_frame()? {
-        sink.send(Message::Binary(frame)).await?;
-    }
-    Ok(reader.finalize_sha256())
 }
 
 pub(crate) async fn send_output(
@@ -112,4 +104,9 @@ pub(crate) async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result
     sink.send(Message::Text(serde_json::to_string(&message)?))
         .await?;
     Ok(())
+}
+
+pub(crate) async fn close_shared_sink(sink: &SharedWsSink) {
+    let mut sink = sink.lock().await;
+    let _ = sink.send(Message::Close(None)).await;
 }

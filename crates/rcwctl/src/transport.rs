@@ -5,13 +5,14 @@ use futures_util::{SinkExt, StreamExt};
 use rcw_common::{
     config,
     protocol::{
-        CommandCompletePayload, CommandOutputPayload, CommandRequestPayload, ControlOpenPayload,
-        ControlOpenResultPayload, DownloadArgs, ErrorPayload, SessionClosePayload,
-        SessionCloseResultPayload, SessionStatusPayload, SessionStatusResultPayload, UploadArgs,
-        WireMessage, COMMAND_DOWNLOAD_BEGIN, COMMAND_UPLOAD_BEGIN, PROTOCOL_VERSION,
-        TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN, TYPE_DOWNLOAD_COMPLETE,
-        TYPE_ERROR, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS,
-        TYPE_SESSION_STATUS_RESULT, TYPE_UPLOAD_COMPLETE,
+        CommandCancelPayload, CommandCancelResultPayload, CommandCompletePayload,
+        CommandOutputPayload, CommandRequestPayload, ControlOpenPayload, ControlOpenResultPayload,
+        DownloadArgs, ErrorPayload, SessionClosePayload, SessionCloseResultPayload,
+        SessionStatusPayload, SessionStatusResultPayload, UploadArgs, WireMessage,
+        COMMAND_DOWNLOAD_BEGIN, COMMAND_UPLOAD_BEGIN, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL,
+        TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN,
+        TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT,
+        TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT, TYPE_UPLOAD_COMPLETE,
     },
     transfer::{total_sequences_for_len, BinaryFrame, BinaryKind, Sha256Accumulator, CHUNK_SIZE},
 };
@@ -24,15 +25,23 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
-use crate::{controller_config::ControllerConfig, session::SessionStore};
+use crate::{
+    cancel::{bail_if_cancelled, CancelFlag},
+    commands::RemoteStartHook,
+    controller_config::{config_wait_timeout, ControllerConfig},
+    session::SessionStore,
+};
 
 type WsStream = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub(crate) struct CommandResponse {
     pub(crate) stdout: String,
     pub(crate) stderr: String,
+    pub(crate) stdout_truncated: bool,
+    pub(crate) stderr_truncated: bool,
     pub(crate) file: Vec<u8>,
     pub(crate) json_stream: String,
     pub(crate) complete: Option<CommandCompletePayload>,
@@ -49,7 +58,9 @@ struct CommandSend<'a> {
     command: &'a str,
     args: Value,
     terminal_kinds: &'a [&'a str],
-    wait: Duration,
+    wait: Option<Duration>,
+    cancel: Option<CancelFlag>,
+    on_remote_start: Option<RemoteStartHook>,
 }
 
 pub(crate) enum IncomingFrame {
@@ -166,7 +177,9 @@ impl<'a> ControlClient<'a> {
             &server,
             message,
             &[rcw_common::protocol::TYPE_CONTROL_OPEN_RESULT],
-            wait,
+            Some(wait),
+            None,
+            None,
         )
         .await?;
         let result: ControlOpenResultPayload = last_payload(&messages)?;
@@ -196,7 +209,9 @@ impl<'a> ControlClient<'a> {
             &session.server,
             message,
             &[TYPE_SESSION_STATUS_RESULT],
-            wait,
+            Some(wait),
+            None,
+            None,
         )
         .await?;
         let result = last_payload(&messages)?;
@@ -218,8 +233,15 @@ impl<'a> ControlClient<'a> {
                 session_token: session.session_token.clone(),
             },
         )?;
-        let messages =
-            send_and_collect(&session.server, message, &[TYPE_SESSION_CLOSE_RESULT], wait).await?;
+        let messages = send_and_collect(
+            &session.server,
+            message,
+            &[TYPE_SESSION_CLOSE_RESULT],
+            Some(wait),
+            None,
+            None,
+        )
+        .await?;
         let result = last_payload(&messages)?;
         self.store.remove_session()?;
         Ok(result)
@@ -231,15 +253,67 @@ impl<'a> ControlClient<'a> {
         command: &str,
         args: Value,
         wait: Duration,
+        cancel: Option<CancelFlag>,
+        on_remote_start: Option<RemoteStartHook>,
     ) -> Result<CommandResponse> {
         self.command_with_terminal(CommandSend {
             request_id,
             command,
             args,
             terminal_kinds: &[TYPE_COMMAND_COMPLETE],
-            wait,
+            wait: Some(wait),
+            cancel,
+            on_remote_start,
         })
         .await
+    }
+
+    pub(crate) async fn command_without_response_timeout(
+        &self,
+        request_id: &str,
+        command: &str,
+        args: Value,
+        cancel: Option<CancelFlag>,
+        on_remote_start: Option<RemoteStartHook>,
+    ) -> Result<CommandResponse> {
+        self.command_with_terminal(CommandSend {
+            request_id,
+            command,
+            args,
+            terminal_kinds: &[TYPE_COMMAND_COMPLETE],
+            wait: None,
+            cancel,
+            on_remote_start,
+        })
+        .await
+    }
+
+    pub(crate) async fn cancel_command(&self, request_id: &str) -> Result<()> {
+        let session = self.store.read_session()?;
+        let message = WireMessage::new(
+            TYPE_COMMAND_CANCEL,
+            Some(request_id.to_owned()),
+            Some(session.session_id.clone()),
+            CommandCancelPayload {
+                session_token: session.session_token.clone(),
+            },
+        )?;
+        let (mut sink, mut stream) = connect_control(&session.server).await?;
+        send_json(&mut sink, message).await?;
+        let messages = collect_until_terminal(
+            &mut stream,
+            &[TYPE_COMMAND_CANCEL_RESULT],
+            Some(config_wait_timeout(self.config)?),
+            None,
+        )
+        .await;
+        close_control(&mut sink).await;
+        let result: CommandCancelResultPayload = last_payload(&messages?)?;
+        if !result.ok {
+            bail!("command cancel was rejected");
+        }
+        self.store.touch_session(session)?;
+        Ok(())
     }
 
     async fn command_with_terminal(&self, send: CommandSend<'_>) -> Result<CommandResponse> {
@@ -256,8 +330,15 @@ impl<'a> ControlClient<'a> {
             Some(session.session_id.clone()),
             payload,
         )?;
-        let messages =
-            send_and_collect(&session.server, message, send.terminal_kinds, send.wait).await?;
+        let messages = send_and_collect(
+            &session.server,
+            message,
+            send.terminal_kinds,
+            send.wait,
+            send.cancel.clone(),
+            send.on_remote_start,
+        )
+        .await?;
         self.store.touch_session(session)?;
         command_response(messages)
     }
@@ -268,6 +349,8 @@ impl<'a> ControlClient<'a> {
         local: &Path,
         args: UploadArgs,
         wait: Duration,
+        cancel: Option<CancelFlag>,
+        on_remote_start: Option<RemoteStartHook>,
     ) -> Result<CommandResponse> {
         let session = self.store.read_session()?;
         let size = args.size;
@@ -285,12 +368,16 @@ impl<'a> ControlClient<'a> {
         )?;
         let (mut sink, mut stream) = connect_control(&session.server).await?;
         send_json(&mut sink, message).await?;
+        if let Some(on_remote_start) = on_remote_start {
+            on_remote_start();
+        }
         let outcome = send_upload_chunks_collecting_responses(
             &mut sink,
             &mut stream,
             request_id,
             local,
             size,
+            cancel.clone(),
         )
         .await?;
         let terminal = outcome.is_terminal();
@@ -300,7 +387,10 @@ impl<'a> ControlClient<'a> {
             self.store.touch_session(session)?;
             return command_response(messages);
         }
-        messages.extend(collect_until_terminal(&mut stream, &[TYPE_UPLOAD_COMPLETE], wait).await?);
+        messages.extend(
+            collect_until_terminal(&mut stream, &[TYPE_UPLOAD_COMPLETE], Some(wait), cancel)
+                .await?,
+        );
         close_control(&mut sink).await;
         self.store.touch_session(session)?;
         command_response(messages)
@@ -312,6 +402,8 @@ impl<'a> ControlClient<'a> {
         remote: &str,
         mut output: tokio::fs::File,
         wait: Duration,
+        cancel: Option<CancelFlag>,
+        on_remote_start: Option<RemoteStartHook>,
     ) -> Result<DownloadStreamResponse> {
         let session = self.store.read_session()?;
         let payload = CommandRequestPayload {
@@ -330,10 +422,14 @@ impl<'a> ControlClient<'a> {
         )?;
         let (mut sink, mut stream) = connect_control(&session.server).await?;
         send_json(&mut sink, message).await?;
+        if let Some(on_remote_start) = on_remote_start {
+            on_remote_start();
+        }
 
         let mut receiver = DownloadReceiver::new(request_id);
         loop {
-            let frame = next_message(&mut stream, wait).await?;
+            bail_if_cancelled(cancel.as_ref())?;
+            let frame = next_message(&mut stream, Some(wait)).await?;
             match frame {
                 IncomingFrame::Text(message) => {
                     if message.kind == TYPE_ERROR {
@@ -361,11 +457,17 @@ async fn send_and_collect(
     server: &str,
     message: WireMessage,
     terminal_kinds: &[&str],
-    wait: Duration,
+    wait: Option<Duration>,
+    cancel: Option<CancelFlag>,
+    on_remote_start: Option<RemoteStartHook>,
 ) -> Result<Vec<IncomingFrame>> {
+    bail_if_cancelled(cancel.as_ref())?;
     let (mut sink, mut stream) = connect_control(server).await?;
     send_json(&mut sink, message).await?;
-    let messages = collect_until_terminal(&mut stream, terminal_kinds, wait).await?;
+    if let Some(on_remote_start) = on_remote_start {
+        on_remote_start();
+    }
+    let messages = collect_until_terminal(&mut stream, terminal_kinds, wait, cancel).await?;
     close_control(&mut sink).await;
     Ok(messages)
 }
@@ -373,10 +475,12 @@ async fn send_and_collect(
 async fn collect_until_terminal(
     stream: &mut WsStream,
     terminal_kinds: &[&str],
-    wait: Duration,
+    wait: Option<Duration>,
+    cancel: Option<CancelFlag>,
 ) -> Result<Vec<IncomingFrame>> {
     let mut messages = Vec::new();
     loop {
+        bail_if_cancelled(cancel.as_ref())?;
         let frame = next_message(stream, wait).await?;
         let terminal = is_terminal_frame(&frame, terminal_kinds)?;
         messages.push(frame);
@@ -405,6 +509,7 @@ async fn send_upload_chunks_collecting_responses(
     request_id: &str,
     local: &Path,
     size: u64,
+    cancel: Option<CancelFlag>,
 ) -> Result<UploadSendOutcome> {
     let mut messages = Vec::new();
     let mut send_file = Box::pin(send_file_binary_chunks(
@@ -413,6 +518,7 @@ async fn send_upload_chunks_collecting_responses(
         BinaryKind::UploadChunk,
         local,
         size,
+        cancel.clone(),
     ));
     loop {
         tokio::select! {
@@ -438,8 +544,10 @@ async fn send_file_binary_chunks(
     kind: BinaryKind,
     path: &Path,
     size: u64,
+    cancel: Option<CancelFlag>,
 ) -> Result<()> {
     let total_sequences = total_sequences_for_len(size)?;
+    bail_if_cancelled(cancel.as_ref())?;
     if size == 0 {
         let frame = BinaryFrame {
             kind,
@@ -460,10 +568,12 @@ async fn send_file_binary_chunks(
     let mut buffer = vec![0_u8; CHUNK_SIZE];
     let mut remaining = size;
     for sequence in 0..total_sequences {
+        bail_if_cancelled(cancel.as_ref())?;
         let chunk_len = remaining.min(CHUNK_SIZE as u64) as usize;
         file.read_exact(&mut buffer[..chunk_len])
             .await
             .with_context(|| format!("failed to read {}", path.display()))?;
+        bail_if_cancelled(cancel.as_ref())?;
         let frame = BinaryFrame {
             kind,
             request_id: request_id.to_owned(),
@@ -514,12 +624,15 @@ async fn next_message_during_upload_send(stream: &mut WsStream) -> Result<Incomi
     }
 }
 
-async fn next_message(stream: &mut WsStream, wait: Duration) -> Result<IncomingFrame> {
+async fn next_message(stream: &mut WsStream, wait: Option<Duration>) -> Result<IncomingFrame> {
     loop {
-        let frame = timeout(wait, stream.next())
-            .await
-            .context("timed out waiting for server response")?
-            .ok_or_else(|| anyhow!("server closed control websocket"))??;
+        let frame = match wait {
+            Some(wait) => timeout(wait, stream.next())
+                .await
+                .context("timed out waiting for server response")?,
+            None => stream.next().await,
+        }
+        .ok_or_else(|| anyhow!("server closed control websocket"))??;
         match frame {
             Message::Text(text) => return Ok(IncomingFrame::Text(serde_json::from_str(&text)?)),
             Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes)),
@@ -538,8 +651,20 @@ fn command_response(messages: Vec<IncomingFrame>) -> Result<CommandResponse> {
                 TYPE_COMMAND_OUTPUT => {
                     let output: CommandOutputPayload = message.payload_as()?;
                     match output.stream.as_str() {
-                        "stdout" => response.stdout.push_str(&output.data),
-                        "stderr" => response.stderr.push_str(&output.data),
+                        "stdout" => {
+                            append_limited_output(
+                                &mut response.stdout,
+                                &mut response.stdout_truncated,
+                                &output.data,
+                            );
+                        }
+                        "stderr" => {
+                            append_limited_output(
+                                &mut response.stderr,
+                                &mut response.stderr_truncated,
+                                &output.data,
+                            );
+                        }
                         "json" => response.json_stream.push_str(&output.data),
                         _ => {}
                     }
@@ -563,6 +688,29 @@ fn command_response(messages: Vec<IncomingFrame>) -> Result<CommandResponse> {
     Ok(response)
 }
 
+fn append_limited_output(target: &mut String, truncated: &mut bool, chunk: &str) {
+    if *truncated {
+        return;
+    }
+    let remaining = MAX_CAPTURED_OUTPUT_BYTES.saturating_sub(target.len());
+    if remaining == 0 {
+        *truncated = true;
+        return;
+    }
+    if chunk.len() <= remaining {
+        target.push_str(chunk);
+        return;
+    }
+    let cutoff = chunk
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= remaining)
+        .last()
+        .unwrap_or(0);
+    target.push_str(&chunk[..cutoff]);
+    *truncated = true;
+}
+
 fn last_payload<T>(messages: &[IncomingFrame]) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -576,4 +724,44 @@ where
         })
         .ok_or_else(|| anyhow!("missing response message"))?;
     Ok(message.payload_as()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_limited_output, MAX_CAPTURED_OUTPUT_BYTES};
+
+    #[test]
+    fn append_limited_output_truncates_at_capture_limit() {
+        let mut output = "a".repeat(MAX_CAPTURED_OUTPUT_BYTES - 2);
+        let mut truncated = false;
+
+        append_limited_output(&mut output, &mut truncated, "bcdef");
+
+        assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_BYTES);
+        assert!(output.ends_with("bc"));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn append_limited_output_keeps_valid_utf8_when_truncating() {
+        let mut output = "a".repeat(MAX_CAPTURED_OUTPUT_BYTES - 1);
+        let mut truncated = false;
+
+        append_limited_output(&mut output, &mut truncated, "éx");
+
+        assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_BYTES - 1);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn append_limited_output_ignores_chunks_after_truncation() {
+        let mut output = "a".repeat(MAX_CAPTURED_OUTPUT_BYTES);
+        let mut truncated = false;
+
+        append_limited_output(&mut output, &mut truncated, "b");
+        append_limited_output(&mut output, &mut truncated, "c");
+
+        assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_BYTES);
+        assert!(truncated);
+    }
 }

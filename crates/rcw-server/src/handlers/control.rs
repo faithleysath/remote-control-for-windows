@@ -19,12 +19,13 @@ use rcw_common::{
     audit::AuditEvent,
     ids::token_label,
     protocol::{
-        CommandRequestPayload, ControlOpenPayload, ErrorCode, HostAuthRequestPayload,
-        HostSessionClosedPayload, SessionClosePayload, SessionCloseResultPayload,
-        SessionStatusPayload, SessionStatusResultPayload, WireMessage, PROTOCOL_VERSION,
-        TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN, TYPE_HOST_AUTH_REQUEST, TYPE_HOST_SESSION_CLOSED,
-        TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS,
-        TYPE_SESSION_STATUS_RESULT,
+        CommandCancelPayload, CommandCancelResultPayload, CommandRequestPayload,
+        ControlOpenPayload, ErrorCode, HostAuthRequestPayload, HostSessionClosedPayload,
+        SessionClosePayload, SessionCloseResultPayload, SessionStatusPayload,
+        SessionStatusResultPayload, WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL,
+        TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN,
+        TYPE_HOST_AUTH_REQUEST, TYPE_HOST_SESSION_CLOSED, TYPE_SESSION_CLOSE,
+        TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
     },
     transfer::BinaryFrame,
 };
@@ -64,6 +65,7 @@ async fn handle_control_socket(socket: WebSocket, state: AppState) {
     }
 
     writer.abort();
+    state.inner.clear_request_routes_for_controller(&tx).await;
 }
 
 async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage) {
@@ -72,6 +74,7 @@ async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage)
         TYPE_SESSION_STATUS => handle_session_status(state, tx, message).await,
         TYPE_SESSION_CLOSE => handle_session_close(state, tx, message).await,
         TYPE_COMMAND_REQUEST => handle_command_request(state, tx, message).await,
+        TYPE_COMMAND_CANCEL => handle_command_cancel(state, tx, message).await,
         other => send_error(
             tx,
             message.request_id,
@@ -80,6 +83,89 @@ async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage)
             &format!("unsupported message type: {other}"),
         ),
     }
+}
+
+async fn handle_command_cancel(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let Some(request_id_value) = request_id.clone() else {
+        send_error(
+            tx,
+            None,
+            message.session_id.clone(),
+            ErrorCode::InternalError,
+            "command.cancel requires request_id",
+        );
+        return;
+    };
+    let payload = match message.payload_as::<CommandCancelPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                message.session_id.clone(),
+                ErrorCode::InternalError,
+                &format!("invalid command.cancel payload: {err}"),
+            );
+            return;
+        }
+    };
+    let Some(session_id) = state.inner.request_session_id(&request_id_value).await else {
+        send_error(
+            tx,
+            request_id,
+            message.session_id,
+            ErrorCode::SessionExpired,
+            "command.cancel has no active request route",
+        );
+        return;
+    };
+    let Some(session) = state
+        .inner
+        .session_if_valid(&session_id, &payload.session_token)
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        );
+        return;
+    };
+    let machine_id = session.machine_id.clone();
+    let session_id = session.session_id.clone();
+    let Some(host_tx) = state.inner.host_tx(&machine_id).await else {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+
+    if !send_text(&host_tx, message) {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    }
+    state.inner.touch_session(&session_id).await;
+    let result = WireMessage::new(
+        TYPE_COMMAND_CANCEL_RESULT,
+        request_id,
+        Some(session_id),
+        CommandCancelResultPayload { ok: true },
+    )
+    .expect("command cancel result serializes");
+    send_text(tx, result);
 }
 
 async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {

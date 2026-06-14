@@ -171,7 +171,7 @@ remote-control-for-windows/
 
 - 当前基线中，一个被控端同一时间只允许一个 active session。
 - 控制端可以在重新验证当前 TOTP 后使用 force reconnect 替换同一被控端的旧 session。
-- 同一 session 内命令默认串行执行，避免鼠标键盘和截图状态混乱。
+- 同一 session 内普通命令默认串行执行，避免鼠标键盘和截图状态混乱；MCP 后台 exec 和 download 会在 host 端以任务运行，以便主 websocket 继续接收取消消息。
 - 当前基线中，文件传输作为长命令处理，不与其他命令并发执行。
 - 后续可以扩展为命令执行并发、输入类命令串行。
 
@@ -182,7 +182,8 @@ remote-control-for-windows/
 - MCP 正常退出：控制端尽力发送 `session.close`；崩溃或强杀时依赖 force reconnect 或服务端空闲清理兜底。
 - 被控端 Ctrl-C 退出：host 尽力发送 WebSocket close，服务端观察到断开后清理 host 和相关 session。
 - 服务端重启：所有主机和 session 失效，需要重新连接和认证。
-- 命令超时：被控端尝试终止子进程并返回 timeout。
+- 命令超时：`exec.timeout_ms` 到期时，被控端尝试终止子进程树并返回 timeout。
+- 命令取消：MCP `exec_cancel` 和已发到远端的 `transfer_cancel` 通过带 session token 的 `command.cancel` 转发到 host；server 成功验证 session、找到 request route 并投递到 host socket 后返回 `command.cancel_result`，之后 MCP 才把本地任务标记为 cancelled。还没发到远端的本地预处理阶段可以直接本地取消。host 收到后杀掉对应远端进程树并释放任务状态。
 - 文件校验失败：控制端返回失败并提示重试。
 - 审计写入失败：命令仍可继续，但三端都必须把本端审计失败作为 warning 暴露；被控端控制台要实时显示本地日志写入失败。
 

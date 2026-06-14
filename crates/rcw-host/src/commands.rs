@@ -1,6 +1,7 @@
-use std::{fs, path::PathBuf, process::Stdio, time::Instant};
+use std::{collections::HashMap, fs, path::PathBuf, process::Stdio, time::Instant};
 
 use anyhow::{anyhow, Result};
+use futures_util::SinkExt;
 use rcw_common::{
     protocol::{
         CommandCompletePayload, CommandRequestPayload, DownloadArgs, ErrorCode, ExecArgs,
@@ -14,20 +15,102 @@ use rcw_common::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
+    sync::watch,
+    task::JoinHandle,
 };
 use tracing::error;
 
 use crate::{
     audit::append_host_audit,
-    output::{
-        send_binary_chunks, send_complete, send_error, send_file_binary_chunks, send_output, WsSink,
-    },
+    output::{send_binary_chunks, send_complete, send_error, send_output, SharedWsSink, WsSink},
     platform, HostContext,
 };
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 128;
 
+pub(crate) type CommandTasks = HashMap<String, CommandTask>;
+
+pub(crate) struct CommandTask {
+    pub(crate) session_id: Option<String>,
+    cancel_tx: watch::Sender<bool>,
+    handle: JoinHandle<()>,
+}
+
+impl CommandTask {
+    pub(crate) fn cancel(&self) {
+        let _ = self.cancel_tx.send(true);
+    }
+
+    pub(crate) fn abort(self) {
+        let _ = self.cancel_tx.send(true);
+        self.handle.abort();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
+
+pub(crate) fn prune_finished_command_tasks(command_tasks: &mut CommandTasks) {
+    command_tasks.retain(|_, task| !task.is_finished());
+}
+
 pub(crate) async fn execute_command(
+    context: &HostContext,
+    sink: &SharedWsSink,
+    command_tasks: &mut CommandTasks,
+    message: rcw_common::protocol::WireMessage,
+    payload: CommandRequestPayload,
+) -> Result<()> {
+    if payload.command == COMMAND_EXEC {
+        spawn_async_command(
+            context.clone(),
+            sink.clone(),
+            command_tasks,
+            message,
+            payload,
+        )?;
+        return Ok(());
+    }
+    if payload.command == COMMAND_DOWNLOAD_BEGIN {
+        spawn_async_command(
+            context.clone(),
+            sink.clone(),
+            command_tasks,
+            message,
+            payload,
+        )?;
+        return Ok(());
+    }
+
+    let mut sink = sink.lock().await;
+    execute_command_inline(context, &mut sink, message, payload).await
+}
+
+pub(crate) async fn cancel_command_task(
+    context: &HostContext,
+    _sink: &SharedWsSink,
+    command_tasks: &mut CommandTasks,
+    message: rcw_common::protocol::WireMessage,
+) -> Result<()> {
+    let Some(request_id) = message.request_id.clone() else {
+        return Ok(());
+    };
+    if let Some(task) = command_tasks.get(&request_id) {
+        task.cancel();
+        append_host_audit(
+            context,
+            "command.cancel",
+            Some(request_id),
+            message.session_id,
+            None,
+            Some("requested"),
+        );
+    }
+    Ok(())
+}
+
+async fn execute_command_inline(
     context: &HostContext,
     sink: &mut WsSink,
     message: rcw_common::protocol::WireMessage,
@@ -57,10 +140,10 @@ pub(crate) async fn execute_command(
 
     let result = match payload.command.as_str() {
         COMMAND_EXEC => {
-            command_exec(context, sink, &request_id, session_id.clone(), payload.args).await
+            command_exec(sink, &request_id, session_id.clone(), payload.args, None).await
         }
         COMMAND_DOWNLOAD_BEGIN => {
-            command_download(sink, &request_id, session_id.clone(), payload.args).await
+            command_download(sink, &request_id, session_id.clone(), payload.args, None).await
         }
         COMMAND_SCREENSHOT => {
             command_screenshot(sink, &request_id, session_id.clone(), payload.args).await
@@ -119,7 +202,142 @@ pub(crate) async fn execute_command(
     Ok(())
 }
 
+fn spawn_async_command(
+    context: HostContext,
+    sink: SharedWsSink,
+    command_tasks: &mut CommandTasks,
+    message: rcw_common::protocol::WireMessage,
+    payload: CommandRequestPayload,
+) -> Result<()> {
+    let request_id = message
+        .request_id
+        .clone()
+        .ok_or_else(|| anyhow!("command.request missing request_id"))?;
+    let session_id = message.session_id.clone();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let task_request_id = request_id.clone();
+    let task_session_id = session_id.clone();
+    let handle = tokio::spawn(async move {
+        run_async_command_task(
+            context,
+            sink,
+            task_request_id,
+            task_session_id,
+            payload,
+            cancel_rx,
+        )
+        .await;
+    });
+    command_tasks.insert(
+        request_id,
+        CommandTask {
+            session_id,
+            cancel_tx,
+            handle,
+        },
+    );
+    Ok(())
+}
+
+async fn run_async_command_task(
+    context: HostContext,
+    sink: SharedWsSink,
+    request_id: String,
+    session_id: Option<String>,
+    payload: CommandRequestPayload,
+    cancel_rx: watch::Receiver<bool>,
+) {
+    let started = Instant::now();
+
+    println!(
+        "[{}] {} started request={}",
+        rcw_common::audit::now_rfc3339(),
+        payload.command,
+        request_id
+    );
+    append_host_audit(
+        &context,
+        "command.started",
+        Some(request_id.clone()),
+        session_id.clone(),
+        Some(payload.command.clone()),
+        Some("started"),
+    );
+
+    let result = {
+        let mut sink = sink.lock().await;
+        match payload.command.as_str() {
+            COMMAND_EXEC => {
+                command_exec(
+                    &mut sink,
+                    &request_id,
+                    session_id.clone(),
+                    payload.args,
+                    Some(cancel_rx),
+                )
+                .await
+            }
+            COMMAND_DOWNLOAD_BEGIN => {
+                command_download(
+                    &mut sink,
+                    &request_id,
+                    session_id.clone(),
+                    payload.args,
+                    Some(cancel_rx),
+                )
+                .await
+            }
+            _ => Err(anyhow!("unsupported async command")),
+        }
+    };
+
+    let ok = result.is_ok();
+    println!(
+        "[{}] {} {} request={}",
+        rcw_common::audit::now_rfc3339(),
+        payload.command,
+        if ok { "ok" } else { "failed" },
+        request_id
+    );
+    append_host_audit(
+        &context,
+        "command.complete",
+        Some(request_id.clone()),
+        session_id.clone(),
+        Some(payload.command),
+        Some(if ok { "ok" } else { "failed" }),
+    );
+
+    if let Err(err) = &result {
+        error!(
+            "command failed after {} ms: {err}",
+            started.elapsed().as_millis()
+        );
+        let code = error_code_for_command_error(err);
+        let _ = send_error(
+            &mut *sink.lock().await,
+            Some(request_id.clone()),
+            session_id.clone(),
+            code,
+            &err.to_string(),
+        )
+        .await;
+    }
+}
+
 fn error_code_for_command_error(err: &anyhow::Error) -> ErrorCode {
+    let is_timeout = err
+        .chain()
+        .any(|cause| cause.to_string().contains("command timed out"));
+    if is_timeout {
+        return ErrorCode::RequestTimeout;
+    }
+    let is_cancelled = err
+        .chain()
+        .any(|cause| cause.to_string().contains("command cancelled"));
+    if is_cancelled {
+        return ErrorCode::Cancelled;
+    }
     let is_unsupported = err.chain().any(|cause| {
         let message = cause.to_string();
         message.contains("only supported on Windows host builds")
@@ -134,11 +352,11 @@ fn error_code_for_command_error(err: &anyhow::Error) -> ErrorCode {
 }
 
 async fn command_exec(
-    _context: &HostContext,
     sink: &mut WsSink,
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
+    cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<()> {
     let args: ExecArgs = serde_json::from_value(args)?;
     let started = Instant::now();
@@ -162,8 +380,12 @@ async fn command_exec(
 
     let wait = child.wait();
     tokio::pin!(wait);
-    let deadline = tokio::time::sleep(std::time::Duration::from_millis(args.timeout_ms));
-    tokio::pin!(deadline);
+    let mut deadline = args.timeout_ms.map(|timeout_ms| {
+        Box::pin(tokio::time::sleep(std::time::Duration::from_millis(
+            timeout_ms,
+        )))
+    });
+    let mut cancel_rx = cancel_rx;
     let status = loop {
         tokio::select! {
             Some((stream, data)) = output_rx.recv() => {
@@ -172,19 +394,34 @@ async fn command_exec(
             result = &mut wait => {
                 break result?;
             }
-            _ = &mut deadline => {
+            _ = async {
+                match deadline.as_mut() {
+                    Some(deadline) => deadline.as_mut().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 if let Some(pid) = pid {
                     let _ = platform::kill_process_tree(pid);
                 }
-                send_error(
-                    sink,
-                    Some(request_id.to_owned()),
-                    session_id,
-                    ErrorCode::RequestTimeout,
-                    ErrorCode::RequestTimeout.message(),
-                )
-                .await?;
                 return Err(anyhow!("command timed out"));
+            }
+            changed = async {
+                match cancel_rx.as_mut() {
+                    Some(cancel_rx) => cancel_rx.changed().await,
+                    None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
+                }
+            } => {
+                let cancelled = changed.is_ok()
+                    && cancel_rx
+                        .as_ref()
+                        .map(|cancel_rx| *cancel_rx.borrow())
+                        .unwrap_or(false);
+                if cancelled {
+                    if let Some(pid) = pid {
+                        let _ = platform::kill_process_tree(pid);
+                    }
+                    return Err(anyhow!("command cancelled"));
+                }
             }
         }
     };
@@ -214,12 +451,20 @@ async fn command_download(
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
+    cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<()> {
     let args: DownloadArgs = serde_json::from_value(args)?;
     let path = PathBuf::from(&args.remote_path);
     let size = fs::metadata(&path)?.len();
-    let sha256 =
-        send_file_binary_chunks(sink, request_id, BinaryKind::DownloadChunk, &path, size).await?;
+    let sha256 = send_file_binary_chunks_cancellable(
+        sink,
+        request_id,
+        BinaryKind::DownloadChunk,
+        &path,
+        size,
+        cancel_rx,
+    )
+    .await?;
     crate::output::send_complete_kind(
         sink,
         rcw_common::protocol::TYPE_DOWNLOAD_COMPLETE,
@@ -235,6 +480,48 @@ async fn command_download(
         },
     )
     .await
+}
+
+async fn send_file_binary_chunks_cancellable(
+    sink: &mut WsSink,
+    request_id: &str,
+    kind: BinaryKind,
+    path: &std::path::Path,
+    size: u64,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> Result<String> {
+    let mut reader =
+        rcw_common::transfer::FileBinaryFrameReader::new(path, size, request_id, kind)?;
+    while let Some(frame) = reader.next_frame()? {
+        if cancel_rx
+            .as_ref()
+            .map(|cancel_rx| *cancel_rx.borrow())
+            .unwrap_or(false)
+        {
+            return Err(anyhow!("command cancelled"));
+        }
+        tokio::select! {
+            result = sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)) => {
+                result?;
+            }
+            changed = async {
+                match cancel_rx.as_mut() {
+                    Some(cancel_rx) => cancel_rx.changed().await,
+                    None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
+                }
+            } => {
+                if changed.is_ok()
+                    && cancel_rx
+                        .as_ref()
+                        .map(|cancel_rx| *cancel_rx.borrow())
+                        .unwrap_or(false)
+                {
+                    return Err(anyhow!("command cancelled"));
+                }
+            }
+        }
+    }
+    Ok(reader.finalize_sha256())
 }
 
 async fn command_screenshot(
@@ -410,6 +697,26 @@ mod tests {
         assert!(matches!(
             error_code_for_command_error(&err),
             ErrorCode::CommandFailed
+        ));
+    }
+
+    #[test]
+    fn timeout_errors_use_request_timeout_code() {
+        let err = anyhow!("command timed out");
+
+        assert!(matches!(
+            error_code_for_command_error(&err),
+            ErrorCode::RequestTimeout
+        ));
+    }
+
+    #[test]
+    fn cancellation_errors_use_cancelled_code() {
+        let err = anyhow!("command cancelled");
+
+        assert!(matches!(
+            error_code_for_command_error(&err),
+            ErrorCode::Cancelled
         ));
     }
 }

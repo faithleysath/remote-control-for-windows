@@ -16,6 +16,7 @@ pub(crate) enum TransferTaskStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -41,6 +42,29 @@ pub(crate) struct TransferTaskStatusResult {
     pub(crate) finished_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<TransferTaskResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct ExecTaskStatusResult {
+    pub(crate) task_id: String,
+    pub(crate) status: ExecTaskStatus,
+    pub(crate) request_id: String,
+    pub(crate) started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<crate::commands::ExecResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
 }
@@ -71,6 +95,16 @@ pub(super) struct ExecParams {
     #[serde(default)]
     #[schemars(description = "Optional remote working directory.")]
     pub(super) cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Maximum remote process runtime in milliseconds. Omit to run without a host-side process timeout."
+    )]
+    pub(super) timeout_ms: Option<u64>,
+    #[serde(default = "default_mcp_exec_wait_timeout_ms")]
+    #[schemars(
+        description = "Milliseconds this MCP tool call waits for completion before returning a background task_id. Use 0 to return immediately."
+    )]
+    pub(super) wait_timeout_ms: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -113,6 +147,24 @@ pub(super) struct TransferStatusParams {
     #[schemars(
         description = "Task ID returned by upload or download when the transfer is still running."
     )]
+    pub(super) task_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct TransferCancelParams {
+    #[schemars(description = "Task ID returned by upload or download.")]
+    pub(super) task_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct ExecStatusParams {
+    #[schemars(description = "Task ID returned by exec when it is still running.")]
+    pub(super) task_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct ExecCancelParams {
+    #[schemars(description = "Task ID returned by exec.")]
     pub(super) task_id: String,
 }
 
@@ -162,6 +214,10 @@ pub(super) struct KeyParams {
 
 fn default_mcp_transfer_wait_timeout_ms() -> u64 {
     DEFAULT_MCP_TRANSFER_WAIT_TIMEOUT_MS
+}
+
+fn default_mcp_exec_wait_timeout_ms() -> u64 {
+    30_000
 }
 
 fn default_screenshot_format() -> String {

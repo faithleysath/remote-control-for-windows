@@ -1,4 +1,5 @@
 mod audit;
+mod cancel;
 mod cli;
 mod commands;
 mod controller_config;
@@ -76,7 +77,9 @@ async fn run() -> Result<i32> {
             .await
         }
         Commands::Status => status_session(&cli, &request_id).await,
-        Commands::Exec { command } => exec_command(&cli, &request_id, command).await,
+        Commands::Exec { command, timeout } => {
+            exec_command(&cli, &request_id, command, timeout.as_deref()).await
+        }
         Commands::Upload {
             local,
             remote,

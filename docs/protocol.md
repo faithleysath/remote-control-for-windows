@@ -42,7 +42,7 @@
 {
   "type": "host.hello",
   "payload": {
-    "protocol_version": 1,
+    "protocol_version": 2,
     "host_version": "0.1.0",
     "machine_id": "8K4F-2M7Q",
     "totp_period_seconds": 120,
@@ -75,7 +75,7 @@
   "type": "control.open",
   "request_id": "01HY...",
   "payload": {
-    "protocol_version": 1,
+    "protocol_version": 2,
     "control_token": "...",
     "machine_id": "8K4F-2M7Q",
     "totp": "183942",
@@ -187,6 +187,40 @@
 
 `audit_label` 可选，供控制端或 Codex 为操作提供简短意图说明。被控端控制台和三端日志都应记录该字段，但不得依赖它做权限判断。
 
+`exec.args.timeout_ms` 可选，表示远端进程运行上限；不传时 host 不主动按运行时长杀进程。控制端/MCP 的等待响应 timeout 是独立语义，不应写入 `exec.args.timeout_ms`。
+
+### command.cancel
+
+用于取消正在运行的请求。当前主要用于 MCP 后台 `exec` 和文件传输取消：
+
+```json
+{
+  "type": "command.cancel",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "session_token": "..."
+  }
+}
+```
+
+服务端先用 `session_token` 验证当前 session，再按原 `request_id` 的 request route 转发给 host。host 收到后会杀掉对应 exec 进程树、停止 download 分块发送，或丢弃对应 upload 临时状态。server 未确认取消或返回 `error` 时，控制端不得把已发到远端的后台任务伪装成 `cancelled`；尚未发到远端的本地预处理阶段可以由控制端直接本地取消。
+
+服务端成功验证 session、找到 request route，并把取消消息投递到当前 host socket 后返回：
+
+```json
+{
+  "type": "command.cancel_result",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "ok": true
+  }
+}
+```
+
+如果 route 失效、token 过期、host 已断开或转发失败，服务端返回 `error`。
+
 ### command.output
 
 用于流式输出：
@@ -276,8 +310,9 @@
 - `invalid_path`
 - `checksum_mismatch`
 - `permission_denied`
+- `cancelled`
 - `internal_error`
 
 ## 版本兼容
 
-所有 hello/open 消息都带 `protocol_version`。当前实现接受协议版本 `1`。后续协议扩展必须保持既有字段含义不变；新行为应通过明确的 capability 字段协商，或有意识地提升协议版本。
+所有 hello/open 消息都带 `protocol_version`。当前实现接受协议版本 `2`。后续协议扩展必须保持既有字段含义不变；新行为应通过明确的 capability 字段协商，或有意识地提升协议版本。

@@ -8,7 +8,6 @@ use crate::cli::Cli;
 pub(crate) struct ControllerConfig {
     pub(crate) server: Option<String>,
     pub(crate) token: Option<String>,
-    pub(crate) timeout: Option<String>,
     pub(crate) audit_label: Option<String>,
 }
 
@@ -17,20 +16,16 @@ impl ControllerConfig {
         Self {
             server: cli.server.clone(),
             token: cli.token.clone(),
-            timeout: cli.timeout.clone(),
             audit_label: cli.audit_label.clone(),
         }
     }
 }
 
-pub(crate) fn config_wait_timeout(config: &ControllerConfig) -> Result<Duration> {
-    match &config.timeout {
-        Some(value) => parse_duration(value),
-        None => Ok(Duration::from_secs(30)),
-    }
+pub(crate) fn config_wait_timeout(_config: &ControllerConfig) -> Result<Duration> {
+    Ok(Duration::from_secs(30))
 }
 
-fn parse_duration(value: &str) -> Result<Duration> {
+pub(crate) fn parse_duration(value: &str) -> Result<Duration> {
     let value = value.trim();
     if let Some(ms) = value.strip_suffix("ms") {
         return Ok(Duration::from_millis(ms.parse()?));

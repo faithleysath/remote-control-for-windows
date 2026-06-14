@@ -1,10 +1,10 @@
 # 测试与验证
 
-本文档面向维护者，记录验证计划和当前实机验证基线。它取代早期 E2E 规划文档，因为 v1 已经有可运行实现和 Windows VM 验证记录。
+本文档面向维护者，记录验证计划和当前实机验证基线。它取代早期 E2E 规划文档，因为早期基线已经有可运行实现和 Windows VM 验证记录。
 
 ## 当前验证记录
 
-2026-06-11，v1 在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。
+2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。协议升级到 v2 后，涉及 `command.cancel`、后台 exec 和后台 download 取消的场景需要重新实机验证。
 
 已验证：
 
@@ -98,7 +98,11 @@ rcwctl connect --id <machine-id> --totp <totp>
 命令执行：
 
 - `exec` 返回 stdout、stderr、退出码和耗时。
-- 长命令按控制端 timeout 设置超时。
+- CLI 没有全局 `--timeout`；`exec --timeout` 控制远端进程运行上限；不传 `exec --timeout` 时 CLI 不主动设置响应等待超时。
+- MCP `exec.timeout_ms` 控制远端进程运行上限，`exec.wait_timeout_ms` 控制单次 tool call 等待窗口。
+- MCP `exec.wait_timeout_ms=0` 返回后台 `task_id`，`exec_status` 最终返回 completed、failed 或 cancelled；stdout/stderr 大输出最多各保留 1 MiB，并设置对应 truncated 标记。
+- MCP `exec_cancel` 会让 host 杀掉对应远端进程，并让任务状态变为 cancelled。
+- MCP `exec_cancel` 在 server 未确认取消或返回 `error` 时不会把任务状态伪装成 cancelled。
 - 超时后的子进程树被清理。
 - host 控制台和三端审计日志都包含 request ID。
 
@@ -108,7 +112,8 @@ rcwctl connect --id <machine-id> --totp <totp>
 - upload 带 `--overwrite` 可以替换文件。
 - download 后 SHA-256 与源文件一致。
 - upload/download 通过 binary frame 流式传输，参数和日志中不出现文件主体或 base64 内容。
-- MCP upload/download 设置较短 `wait_timeout_ms` 时返回 `task_id`，`transfer_status` 最终返回 completed 或 failed。
+- MCP upload/download 设置较短 `wait_timeout_ms` 时返回 `task_id`，`transfer_status` 最终返回 completed、failed 或 cancelled。
+- MCP `transfer_cancel` 会把后台传输任务状态变为 cancelled；upload 在本地 hash/校验阶段可直接取消，发到远端后会清理 host 临时状态，download 会停止 host 远端分块发送并清理本地临时文件。
 - 损坏或不匹配的传输返回 `checksum_mismatch` 或等价结构化错误。
 
 GUI 操作：
