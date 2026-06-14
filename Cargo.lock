@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-common"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64",
  "hex",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-host"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-server"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "rcwctl"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",

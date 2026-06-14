@@ -43,7 +43,7 @@ v1 链路已经在以下 crate 中实现：
 - `rcw-host`：Windows 被控端连接、重连循环、机器 ID/TOTP 显示、剪贴板刷新、TOTP 鉴权、命令执行、文件传输、截图、窗口/鼠标/键盘操作、审计、权限显示和电源 guard。
 - `rcwctl`：`connect/status/exec/exec-status/exec-cancel/upload/download/screenshot/windows/mouse-move/mouse-click/mouse-scroll/keyboard-type/keyboard-key/disconnect/mcp`、JSON 输出、session 文件复用、MCP 内存 session 和 controller 审计。
 
-截至 2026-06-14，`0.1.6` 已在 Windows VM 中完成协议 v4 主链路 E2E，覆盖 host identity/routing、后台 exec、取消语义和 MCP 文件传输后台任务。剩余标准用户交互桌面权限显示验证项见 [testing.md](testing.md)。
+截至 2026-06-14，`0.1.6` 已在 Windows VM 中完成协议 v4 主链路 E2E，覆盖 host identity/routing、后台 exec、取消语义和 MCP 文件传输后台任务；`0.1.7` 追加完成 125% DPI screenshot、`Control+End` 和鼠标坐标一致性修复验证。剩余标准用户交互桌面权限显示验证项见 [testing.md](testing.md)。
 
 ## 非目标
 

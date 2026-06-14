@@ -108,6 +108,13 @@ pub fn is_elevated() -> bool {
     }
 }
 
+pub fn enable_process_dpi_awareness() {
+    #[cfg(windows)]
+    {
+        windows_impl::enable_process_dpi_awareness();
+    }
+}
+
 pub fn copy_connection_info(text: &str) -> Result<()> {
     #[cfg(windows)]
     {
@@ -293,6 +300,10 @@ mod windows_impl {
                 Threading::{GetCurrentProcess, OpenProcessToken},
             },
             UI::{
+                HiDpi::{
+                    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE,
+                    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+                },
                 Input::KeyboardAndMouse::{
                     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
                     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
@@ -310,6 +321,21 @@ mod windows_impl {
     };
 
     const CF_UNICODETEXT: u32 = 13;
+
+    pub fn enable_process_dpi_awareness() {
+        // SAFETY: This process-wide setting takes a documented DPI awareness context and must run
+        // before user32 metrics/capture APIs are used. Failure is non-fatal; Windows may reject it
+        // if DPI awareness was already fixed by manifest or earlier API use.
+        unsafe {
+            if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_ok() {
+                return;
+            }
+            if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE).is_ok() {
+                return;
+            }
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        }
+    }
 
     fn null_hwnd() -> HWND {
         HWND(null_mut())
@@ -862,6 +888,11 @@ mod windows_impl {
             "escape" | "esc" => 0x1B,
             "backspace" => 0x08,
             "delete" | "del" => 0x2E,
+            "insert" | "ins" => 0x2D,
+            "home" => 0x24,
+            "end" => 0x23,
+            "pageup" | "page_up" | "page-up" | "pgup" => 0x21,
+            "pagedown" | "page_down" | "page-down" | "pgdn" => 0x22,
             "up" => 0x26,
             "down" => 0x28,
             "left" => 0x25,

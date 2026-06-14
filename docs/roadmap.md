@@ -21,6 +21,8 @@
 
 2026-06-14，`0.1.6` 已刷新协议 v4 实机 E2E，覆盖 host identity/routing、server-owned 后台 exec、CLI/MCP 的 `exec-status` / `exec-cancel`、MCP 文件传输后台任务和取消语义。验证记录见 [v0.1.6 E2E 测试报告](e2e-v0.1.6.md)。
 
+同日，`0.1.7` 追加完成 host 侧 125% DPI 修复验证，覆盖 screenshot 裁剪、`Control+End` 导航键和 MCP 鼠标坐标一致性。验证记录见 [v0.1.7 E2E 修复验证报告](e2e-v0.1.7.md)。
+
 ## 维护优先级
 
 - 闭合剩余的标准用户交互桌面验证缺口。

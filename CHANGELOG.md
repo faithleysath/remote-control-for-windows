@@ -4,6 +4,12 @@
 
 ## 未发布
 
+## 0.1.7 - 2026-06-14
+
+- Windows host 启动早期设置 per-monitor DPI awareness，修复 125% 缩放环境下 screenshot 使用逻辑尺寸导致右侧和底部被裁剪的问题。
+- 扩展 `keyboard_key` 的导航键映射，支持 `End`、`Home`、`PageUp`、`PageDown` 和 `Insert`，修复 `Control+End` 返回 `unsupported key: end`。
+- 在 `win11-data` 1920x1080 / 125% 缩放环境下复测 screenshot、`Control+End` 和 MCP 鼠标坐标靶场；协议版本保持 v4 不变，鼠标操控实现未修改。
+
 ## 0.1.6 - 2026-06-14
 
 - 升级 wire protocol 到 v4，引入运行期 `host_id` 和 host `connection_id`，服务端按 `host_id` 路由在线 host、session、request 和后台 exec job。

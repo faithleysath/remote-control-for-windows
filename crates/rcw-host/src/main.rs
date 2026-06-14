@@ -45,6 +45,7 @@ pub(crate) struct HostContext {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    platform::enable_process_dpi_awareness();
     tracing_subscriber::fmt().compact().init();
     let args = Args::parse();
 

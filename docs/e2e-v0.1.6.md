@@ -22,7 +22,7 @@
 - host exe SHA-256：`3855dcbb2fd65adb53b2ddb60561c43bacce8459a8145dd6359e47d358544ad3`
 - 控制端：`rcwctl@0.1.6`，Codex MCP `rcw-zhang`
 
-测试时 host 在管理员 elevated 交互桌面中运行。测试结束后已断开会话并停止 host 进程。
+测试时 host 在管理员 elevated 交互桌面中运行。基础功能主链路在 100% 缩放桌面验证；[#6](https://github.com/faithleysath/remote-control-for-windows/issues/6) 复现补测在同一 VM 调整到 1920x1080 / 125% 缩放后执行。测试结束后已断开会话并停止 host 进程。
 
 ## 验证摘要
 
@@ -84,7 +84,7 @@
 
 已验证：
 
-- MCP `screenshot` 在 `win11-data` 当前 100% 缩放环境返回有效 PNG，尺寸 `1280x720`，非空。
+- MCP `screenshot` 在 `win11-data` 100% 缩放环境返回有效 PNG，尺寸 `1280x720`，非空。
 - MCP `windows` 返回可见窗口列表，包含 focused、handle、title、process_id、rect、visible。
 - `keyboard_type`、`keyboard_key` 可向焦点 Notepad 输入文本和换行。
 - 截图确认文本实际进入 Notepad 窗口。
@@ -93,7 +93,7 @@
 针对两个已知 GUI issue 的复测结论：
 
 - [#1](https://github.com/faithleysath/remote-control-for-windows/issues/1)：`keyboard_key` 发送 `Control+End` 在 `0.1.6` 上可复现失败，返回 `CommandFailed: unsupported key: end`。同一轮复测中，`keyboard_type` 输入 `typed-through hyphen-test alpha-beta gamma-delta` 后截图和文件读回均正确，未复现连字符变形。
-- [#6](https://github.com/faithleysath/remote-control-for-windows/issues/6)：`win11-data` 当前交互桌面为 100% 缩放，DPI 探针返回 `LogPixels=96x96`、`Scale=1`、`SystemMetrics=1280x720`、`DesktopRes=1280x720`，rcw screenshot 同为 `1280x720`，因此本轮环境未复现 150% 缩放裁剪。该 issue 仍保留为基于 150% 缩放实机证据的已知缺口。
+- [#6](https://github.com/faithleysath/remote-control-for-windows/issues/6)：已在 `win11-data` 的 1920x1080 / 125% 缩放环境复现。由 `rcw-host` 同一会话执行的 DPI 探针返回 `SystemMetrics=1536x864`、`DesktopRes=1920x1080`、`PrimaryBounds=1536x864`；rcw screenshot 输出 PNG 也是 `1536x864`。同一时刻 DPI-aware 对照截图为 `1920x1080`，并能看到物理右下角红色标记、右侧桌面和底部任务栏；rcw screenshot 看不到这些右下区域，证明截图使用 DPI 虚拟化逻辑坐标并裁剪了物理桌面右侧和底部。
 
 ### 剪贴板、安全和电源
 
@@ -112,6 +112,9 @@
 
 - `/tmp/rcw-v016-screenshot.png`
 - `/tmp/rcw-v016-after-input.png`
+- `/tmp/rcw-v016-dpi125-screenshot.png`
+- `/tmp/rcw-v016-dpi125-marker-dpiaware.png`
+- `/tmp/rcw-v016-dpi125-marker-rcw.png`
 - `/tmp/rcw-v016-host.log`
 - `/tmp/rcw-v016-large.bin`
 - `/tmp/rcw-v016-large-downloaded.bin`
@@ -124,11 +127,11 @@
 
 - 标准用户权限下启动 host，只验证了管理员 elevated 桌面。
 - 锁屏、UAC 安全桌面和非交互 session 0。
-- 150% 或其他非 100% DPI 缩放环境下的 screenshot/鼠标坐标一致性。
+- 150% DPI 缩放环境尚未单独复测；125% screenshot 裁剪已在 `0.1.6` 复测中复现，修复验证见 `0.1.7` 报告。
 - TOTP 周期不一致错误。
 - download transfer cancel 的单独路径。
 - 人为构造 checksum mismatch 或损坏传输。
-- 鼠标右键、中键和全部 keyboard key 名称。已知 `Control+End` 在本轮复测中仍不支持。
+- 鼠标右键、中键和全部 keyboard key 名称；`Control+End` 在 `0.1.6` 中可复现失败，修复验证见 `0.1.7` 报告。
 - server 后台长期 idle cleanup。
 - 真实或模拟短 `machine_id` 冲突。
 
