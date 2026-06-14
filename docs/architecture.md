@@ -78,8 +78,8 @@ remote-control-for-windows/
 
 - `tokio` 处理网络和命令调度。
 - `windows` crate 调用 Win32 API。
-- `sha2` 或 `blake3` 处理哈希。
-- `totp-rs` 或等价轻量实现处理 TOTP。
+- `sha2` 处理机器 ID、token label 和文件 SHA-256。
+- `hmac` + `sha1` 处理当前内置 TOTP/HOTP 逻辑。
 - `windows` crate 调用剪贴板 API；剪贴板失败只影响易用性，不阻断主机上线。
 - `windows` crate 调用电源管理 API；电源请求失败只显示 warning，不阻断主机上线。
 
@@ -123,13 +123,21 @@ remote-control-for-windows/
 6. 服务端创建 session，并返回 session token。
 7. 控制端保存 session token 到本地。
 
-### 命令执行
+### 普通命令执行
 
 1. 控制端发送 `command.request`。
 2. 服务端根据 session 转发给被控端。
 3. 被控端执行命令。
 4. 被控端返回 `command.output` 和 `command.complete`。
 5. 服务端转发结果给控制端。
+
+### 后台 exec
+
+1. 控制端发送 `command.start`，当前仅支持 `command=exec`。
+2. 服务端验证 session 后创建 server-owned exec job，将消息改写为 `command.request` 并转发给 host。
+3. 服务端立即返回 `command.start_result`，其中 `request_id` 同时也是后续查询和取消使用的 `task_id`。
+4. host 后续返回的 `command.output`、`command.complete` 或 `error` 写入服务端 job 快照。
+5. CLI 或 MCP 后续通过 `command.status` 查询，或通过 `command.cancel` 请求 host 取消。
 
 ### 会话状态查询
 
@@ -145,6 +153,7 @@ remote-control-for-windows/
 - 在线主机表：`machine_id -> host_connection`。
 - 会话表：`session_id -> machine_id, controller, created_at, last_seen`。
 - 待处理请求表：`request_id -> response_channel`。
+- server-owned exec job 表：`task_id -> status/stdout/stderr/complete/error`。
 - 审计写入器：按结构化日志记录事件，不参与会话状态恢复。
 
 被控端状态：
@@ -185,7 +194,7 @@ remote-control-for-windows/
 - 被控端 Ctrl-C 退出：host 尽力发送 WebSocket close，服务端观察到断开后清理 host 和相关 session。
 - 服务端重启：所有主机和 session 失效，需要重新连接和认证。
 - 命令超时：`exec.timeout_ms` 到期时，被控端尝试终止子进程树并返回 timeout。
-- 命令取消：CLI/MCP `exec_cancel` 和已发到远端的 `transfer_cancel` 通过带 session token 的 `command.cancel` 转发到 host；server 成功验证 session、找到 request route 或 server-owned exec job 并投递到 host socket 后返回 `command.cancel_result`。exec 任务的最终 cancelled/failed 由 host 后续回包写入 server job；transfer 在确认远端取消已投递后可更新 MCP 进程内状态。还没发到远端的本地预处理阶段可以直接本地取消。host 收到后杀掉对应远端进程树并释放任务状态。
+- 命令取消：CLI/MCP `exec_cancel` 和已发到远端的 `transfer_cancel` 通过带 session token 的 `command.cancel` 转发到 host；server 成功验证 session、找到 request route 或 server-owned exec job 并投递到 host socket 后返回 `command.cancel_result`。exec 任务的最终 cancelled/failed 由 host 后续回包写入 server job；transfer 在确认远端取消已投递后由 MCP 进程 abort 本地任务、清理本地临时文件并标记 cancelled。还没发到远端的本地预处理阶段可以直接本地取消。host 收到后杀掉对应远端进程树并释放任务状态。
 - 文件校验失败：控制端返回失败并提示重试。
 - 审计写入失败：命令仍可继续，但三端都必须把本端审计失败作为 warning 暴露；被控端控制台要实时显示本地日志写入失败。
 

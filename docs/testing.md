@@ -4,7 +4,7 @@
 
 ## 当前验证记录
 
-2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。协议升级到 v3 后，涉及 `command.start`、`command.status`、server-owned 后台 exec 和文件传输取消的场景需要重新实机验证。
+2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。当前代码协议版本为 v3；涉及 `command.start`、`command.status`、server-owned 后台 exec、CLI/MCP exec 取消和 MCP 文件传输取消的场景需要重新实机验证。
 
 已验证：
 
@@ -114,7 +114,8 @@ rcwctl connect --id <machine-id> --totp <totp>
 - download 后 SHA-256 与源文件一致。
 - upload/download 通过 binary frame 流式传输，参数和日志中不出现文件主体或 base64 内容。
 - MCP upload/download 设置较短 `wait_ms` 时返回 MCP 进程内 `task_id`，`transfer_status` 最终返回 completed、failed 或 cancelled。该 task 依赖 MCP 进程继续读写本地文件，不是 server-owned detached job。
-- MCP `transfer_cancel` 会把进程内传输任务状态变为 cancelled；upload 在本地 hash/校验阶段可直接取消，发到远端后会清理 host 临时状态，download 会停止 host 远端分块发送并清理本地临时文件。
+- MCP `transfer_cancel` 会把进程内传输任务状态变为 cancelled；upload 在本地 hash/校验阶段可直接取消，发到远端后必须先收到 server 的 `command.cancel_result`，再清理 host 临时状态；download 会通知 host 停止远端分块发送并清理本地临时文件。
+- MCP `transfer_cancel` 在远端阶段已开始且 server 未确认取消或返回 `error` 时应返回错误，不能先本地伪装成成功取消。
 - 损坏或不匹配的传输返回 `checksum_mismatch` 或等价结构化错误。
 
 GUI 操作：

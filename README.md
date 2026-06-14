@@ -19,13 +19,19 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 ## 当前状态
 
-2026-06-11 已验证：
+当前代码主链路已经实现，早期基线在 2026-06-11 完成过 Windows VM 实机验证：
 
 - 本地 Rust 检查：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`。
 - Linux 上通过 `cargo-xwin` 交叉构建静态 CRT 的 Windows 被控端。
 - Windows VM 实机 E2E：会话 `connect/status/disconnect`、错误 token/TOTP/TOTP 周期处理、命令执行、命令超时清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
 
-仍需补齐的验证项：
+已实现但仍需刷新实机验证的项：
+
+- 协议 v3 的 `command.start` / `command.status` server-owned exec job。
+- CLI/MCP 的后台 exec 查询和取消。
+- MCP 进程内 upload/download 后台任务和取消路径。
+
+仍需补齐的早期验证项：
 
 - 在真实标准用户交互桌面中启动 `rcw-host.exe`，最终确认控制台显示 `Privilege: standard user`。管理员 elevated 桌面行为已经验证通过。
 
@@ -106,7 +112,7 @@ rcwctl --json exec -- pwsh -NoProfile -Command "hostname"
 }
 ```
 
-MCP 模式下先调用 `connect` 打开远控会话，再调用 `exec`、`screenshot`、`windows`、鼠标键盘和文件传输工具。agent 发送或接收文件使用 `upload` / `download` 这类路径型工具，让 MCP 服务器自己流式读写本机文件；文件主体走 WebSocket binary frame，不走 base64。`upload` / `download` 默认等待 60 秒，未完成就返回 `task_id`，后续用 `transfer_status` 查询。MCP 进程只在内存中保存 session 和后台传输任务状态，不写普通 CLI 的本地 session 文件。
+MCP 模式下先调用 `connect` 打开远控会话，再调用 `exec`、`screenshot`、`windows`、鼠标键盘和文件传输工具。`exec` 默认远端运行上限为 24 小时，单次 tool call 默认等待 90 秒；未完成时返回 server-owned `task_id`，后续可用 `exec_status` 查询或 `exec_cancel` 取消。agent 发送或接收文件使用 `upload` / `download` 这类路径型工具，让 MCP 服务器自己流式读写本机文件；文件主体走 WebSocket binary frame，不走 base64。`upload` / `download` 默认等待 60 秒，未完成就返回 MCP 进程内 `task_id`，后续用 `transfer_status` 查询。MCP 进程只在内存中保存 session 和后台传输任务状态，不写普通 CLI 的本地 session 文件。
 
 ## 构建
 

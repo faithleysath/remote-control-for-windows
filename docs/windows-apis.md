@@ -2,7 +2,7 @@
 
 ## 目标
 
-本文列出 `rcw-host.exe` v1 需要用到的 Windows 能力、建议 API、实现注意事项和限制。实现时优先使用 Rust `windows` crate 绑定 Win32 API。
+本文列出 `rcw-host.exe` 当前用到的 Windows 能力、实现 API、注意事项和限制。实现优先使用 Rust `windows` crate 绑定 Win32 API。
 
 ## 机器 ID
 
@@ -11,16 +11,17 @@
 - 生成稳定机器 ID。
 - 不泄露原始机器标识。
 
-候选来源：
+当前 Windows 来源：
 
 - 注册表 `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`。
-- WMI/SMBIOS 的主板 UUID 作为备用。
+
+非 Windows 开发/测试构建会退化为 hostname 和 Linux `/etc/machine-id` 这类本机稳定材料；Windows 发布目标不依赖这条路径。
 
 处理：
 
 1. 读取一个或多个稳定标识。
 2. 拼接产品 namespace。
-3. 使用 SHA-256 或 BLAKE3。
+3. 使用 SHA-256。
 4. 编码成短 ID，例如 `8K4F-2M7Q`。
 
 限制：
@@ -35,7 +36,7 @@
 - 检测当前进程是否 elevated。
 - 管理员运行时控制台高亮。
 
-建议 API：
+当前 API：
 
 - `OpenProcessToken`
 - `GetTokenInformation`
@@ -54,7 +55,7 @@
 - 持续显示 ID、TOTP、连接状态、会话状态、权限状态和审计摘要。
 - 管理员权限高亮。
 
-建议 API：
+当前 API：
 
 - `GetStdHandle`
 - `SetConsoleTextAttribute`
@@ -70,7 +71,7 @@
 
 - 启动和每次 TOTP 刷新时复制连接信息。
 
-建议 API：
+当前 API：
 
 - `OpenClipboard`
 - `EmptyClipboard`
@@ -100,7 +101,7 @@
 - `rcw-host.exe` 运行期间阻止显示器因空闲策略熄屏。
 - 退出后恢复 Windows 默认电源行为。
 
-建议 API：
+当前 API：
 
 - `SetThreadExecutionState`
 - flags:
@@ -134,7 +135,7 @@ SetThreadExecutionState(ES_CONTINUOUS)
 
 - 获取当前交互桌面截图并编码为 PNG。
 
-建议 API：
+当前 API：
 
 - `GetDC`
 - `CreateCompatibleDC`
@@ -147,8 +148,8 @@ SetThreadExecutionState(ES_CONTINUOUS)
 
 多显示器：
 
-- 使用 `EnumDisplayMonitors` 获取显示器信息。
-- v1 支持 `--display <index>`，默认主显示器或虚拟屏幕。
+- 当前实现截取 Windows 虚拟屏幕区域。
+- `display` 参数当前必须为空或 `0`；其他 index 返回错误。
 
 DPI：
 
@@ -166,7 +167,7 @@ DPI：
 
 - 返回可见窗口列表和基础信息。
 
-建议 API：
+当前 API：
 
 - `EnumWindows`
 - `IsWindowVisible`
@@ -195,7 +196,7 @@ DPI：
 
 - 移动、点击、滚轮。
 
-建议 API：
+当前 API：
 
 - `SetCursorPos`
 - `SendInput`
@@ -217,7 +218,7 @@ DPI：
 - 输入文本。
 - 发送单键和组合键。
 
-建议 API：
+当前 API：
 
 - `SendInput`
 - Unicode text input 使用 `KEYEVENTF_UNICODE`
@@ -236,14 +237,11 @@ DPI：
 - 在当前 host 用户权限下执行命令。
 - 支持 stdout/stderr、exit code、timeout。
 
-建议 API/策略：
+当前策略：
 
-- 当前实现可以使用 `tokio::process::Command`，并在需要时补充 Windows 专属清理逻辑。
-- 为 timeout 清理子进程树，建议 Windows Job Object：
-  - `CreateJobObjectW`
-  - `SetInformationJobObject`
-  - `AssignProcessToJobObject`
-  - `TerminateJobObject`
+- 使用 `tokio::process::Command` 启动进程。
+- 使用 `kill_on_drop(true)` 降低控制端任务被丢弃时的残留风险。
+- timeout 或取消时，Windows 目标调用 `taskkill.exe /T /F /PID <pid>` 清理进程树；非 Windows 开发构建调用 `kill -TERM <pid>`。
 - 创建进程时保留 stdout/stderr pipe。
 
 限制：
@@ -259,7 +257,7 @@ DPI：
 
 - 上传、下载、校验文件。
 
-建议：
+当前实现：
 
 - 使用 Rust 标准库处理文件。
 - Windows 路径按 Windows 规则解析。

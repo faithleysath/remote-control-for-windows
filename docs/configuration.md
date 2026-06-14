@@ -101,7 +101,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 target/x86_64-pc-windows-msvc/release/rcw-host.exe
 ```
 
-使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的实机测试产物为 x86-64 Windows console PE，已在维护者本机的 Windows VM 中运行通过。
+使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的早期实机测试产物为 x86-64 Windows console PE，已在维护者本机的 Windows VM 中运行通过；涉及协议 v3 后台 exec 和取消语义的后续改动仍应按 [testing.md](testing.md) 刷新验证。
 
 如果在其他机器上无法使用 `cargo-xwin`，可以改在 Windows builder 上执行同等 release 构建，并记录构建命令和 SHA-256。
 
@@ -197,30 +197,29 @@ curl https://remote.example.com/healthz
 
 ## 版本信息
 
-三个二进制都应支持：
+当前 `rcwctl` 和 `rcw-host.exe` 通过 clap 支持：
 
 ```bash
 --version
 ```
 
-输出内容：
-
-- 版本号。
-- git commit。
-- protocol version。
-- embedded server URL 是否存在。
+输出当前 crate 版本号，例如 `rcwctl 0.1.4`。`rcw-server` 当前没有独立 `--version` 参数；服务启动后可通过 `/healthz` 查看服务名和 `protocol_version`。
 
 ## 发布包
 
-建议发布结构：
+当前自动发布结构：
 
 ```text
-release/
+GitHub Release assets:
+  rcw-tools-x86_64-unknown-linux-gnu.tar.gz
+  rcw-tools-aarch64-unknown-linux-gnu.tar.gz
+  rcw-tools-x86_64-apple-darwin.tar.gz
+  rcw-tools-aarch64-apple-darwin.tar.gz
+  rcw-tools-x86_64-pc-windows-msvc.zip
+  rcw-tools-aarch64-pc-windows-msvc.zip
   rcw-host-x86_64-pc-windows-msvc.zip
-  rcwctl-x86_64-unknown-linux-gnu.tar.gz
-  rcwctl-x86_64-pc-windows-msvc.zip
-  rcw-server-x86_64-unknown-linux-gnu.tar.gz
+  rcw-host-aarch64-pc-windows-msvc.zip
   checksums.txt
 ```
 
-`checksums.txt` 使用 SHA-256。
+`rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`，`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256。

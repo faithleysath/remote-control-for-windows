@@ -4,7 +4,12 @@
 
 ## 未发布
 
-暂无。
+- 升级 wire protocol 到 v3，新增 `command.start` / `command.status`，让 CLI 和 MCP 的长时间 `exec` 都使用 server-owned 后台任务。
+- 增加 `rcwctl exec-status` 和 `rcwctl exec-cancel`，支持短 CLI 进程后续查询或取消后台 exec。
+- MCP `exec` 支持 `wait_ms`，未完成时返回 server-owned `task_id`；`exec_status` 和 `exec_cancel` 可复用同一任务。
+- 后台 exec 的 stdout/stderr 在 server 侧各最多保留 1 MiB，并通过 truncated 标记暴露截断。
+- 取消路径改为等待 server 返回 `command.cancel_result` 后再确认已投递到 host，避免把本地发送成功误当作远端接受。
+- MCP 上传/下载后台任务继续保存在 MCP 进程内，和 server-owned exec job 明确分离。
 
 ## 0.1.4 - 2026-06-12
 
