@@ -42,7 +42,7 @@
 {
   "type": "host.hello",
   "payload": {
-    "protocol_version": 2,
+    "protocol_version": 3,
     "host_version": "0.1.0",
     "machine_id": "8K4F-2M7Q",
     "totp_period_seconds": 120,
@@ -75,7 +75,7 @@
   "type": "control.open",
   "request_id": "01HY...",
   "payload": {
-    "protocol_version": 2,
+    "protocol_version": 3,
     "control_token": "...",
     "machine_id": "8K4F-2M7Q",
     "totp": "183942",
@@ -187,11 +187,99 @@
 
 `audit_label` 可选，供控制端或 Codex 为操作提供简短意图说明。被控端控制台和三端日志都应记录该字段，但不得依赖它做权限判断。
 
-`exec.args.timeout_ms` 可选，表示远端进程运行上限；不传时 host 不主动按运行时长杀进程。控制端/MCP 的等待响应 timeout 是独立语义，不应写入 `exec.args.timeout_ms`。
+`exec.args.timeout_ms` 可选，表示远端进程运行上限；当前 rcwctl CLI 和 MCP 默认都会填入 24 小时。控制端/MCP 的等待响应 timeout 是独立语义，不应写入 `exec.args.timeout_ms`。
+
+### command.start
+
+用于创建 server-owned exec job。当前只支持 `command=exec`，不用于 upload/download，因为文件传输需要控制端进程持续读写本地文件。
+
+请求体与 `command.request` 使用同一个 payload；`request_id` 同时也是后续查询和取消使用的 `task_id`：
+
+```json
+{
+  "type": "command.start",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "session_token": "...",
+    "command": "exec",
+    "args": {
+      "program": "pwsh",
+      "argv": ["-NoProfile", "-Command", "Start-Sleep 30; 'done'"]
+    }
+  }
+}
+```
+
+服务端验证 session 后创建内存 job，把消息转成 `command.request` 转发给 host，并返回初始状态：
+
+```json
+{
+  "type": "command.start_result",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "task_id": "01HY...",
+    "status": "running",
+    "request_id": "01HY...",
+    "started_at": "2026-06-14T...",
+    "stdout": "",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false
+  }
+}
+```
+
+server 会记录有限 stdout/stderr、完成 payload 或错误；job 有服务端 TTL，只用于短期恢复和查询，不是永久审计存储。
+
+### command.status
+
+查询 server-owned exec job：
+
+```json
+{
+  "type": "command.status",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "session_token": "...",
+    "task_id": "01HY..."
+  }
+}
+```
+
+返回：
+
+```json
+{
+  "type": "command.status_result",
+  "request_id": "01HY...",
+  "session_id": "01HY...",
+  "payload": {
+    "task_id": "01HY...",
+    "status": "completed",
+    "request_id": "01HY...",
+    "started_at": "2026-06-14T...",
+    "finished_at": "2026-06-14T...",
+    "stdout": "done\n",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "complete": {
+      "ok": true,
+      "exit_code": 0,
+      "duration_ms": 30000
+    }
+  }
+}
+```
+
+`status` 可为 `running`、`completed`、`failed` 或 `cancelled`。失败时返回 `error` payload。
 
 ### command.cancel
 
-用于取消正在运行的请求。当前主要用于 MCP 后台 `exec` 和文件传输取消：
+用于取消正在运行的请求。当前用于 server-owned exec job 和 MCP 进程内文件传输取消：
 
 ```json
 {
@@ -204,9 +292,9 @@
 }
 ```
 
-服务端先用 `session_token` 验证当前 session，再按原 `request_id` 的 request route 转发给 host。host 收到后会杀掉对应 exec 进程树、停止 download 分块发送，或丢弃对应 upload 临时状态。server 未确认取消或返回 `error` 时，控制端不得把已发到远端的后台任务伪装成 `cancelled`；尚未发到远端的本地预处理阶段可以由控制端直接本地取消。
+服务端先用 `session_token` 验证当前 session，再按原 `request_id` 的 request route 或 server-owned exec job 转发给 host。host 收到后会杀掉对应 exec 进程树、停止 download 分块发送，或丢弃对应 upload 临时状态。server 未确认取消或返回 `error` 时，控制端不得把已发到远端的后台任务伪装成 `cancelled`；尚未发到远端的本地预处理阶段可以由控制端直接本地取消。
 
-服务端成功验证 session、找到 request route，并把取消消息投递到当前 host socket 后返回：
+服务端成功验证 session、找到 request route 或 server-owned exec job，并把取消消息投递到当前 host socket 后返回：
 
 ```json
 {

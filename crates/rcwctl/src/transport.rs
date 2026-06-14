@@ -6,13 +6,16 @@ use rcw_common::{
     config,
     protocol::{
         CommandCancelPayload, CommandCancelResultPayload, CommandCompletePayload,
-        CommandOutputPayload, CommandRequestPayload, ControlOpenPayload, ControlOpenResultPayload,
-        DownloadArgs, ErrorPayload, SessionClosePayload, SessionCloseResultPayload,
-        SessionStatusPayload, SessionStatusResultPayload, UploadArgs, WireMessage,
-        COMMAND_DOWNLOAD_BEGIN, COMMAND_UPLOAD_BEGIN, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL,
-        TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN,
-        TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT,
-        TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT, TYPE_UPLOAD_COMPLETE,
+        CommandOutputPayload, CommandRequestPayload, CommandStatusPayload,
+        CommandStatusResultPayload, ControlOpenPayload, ControlOpenResultPayload, DownloadArgs,
+        ErrorPayload, SessionClosePayload, SessionCloseResultPayload, SessionStatusPayload,
+        SessionStatusResultPayload, UploadArgs, WireMessage, COMMAND_DOWNLOAD_BEGIN,
+        COMMAND_UPLOAD_BEGIN, MAX_CAPTURED_OUTPUT_BYTES, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL,
+        TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_COMMAND_START,
+        TYPE_COMMAND_START_RESULT, TYPE_COMMAND_STATUS, TYPE_COMMAND_STATUS_RESULT,
+        TYPE_CONTROL_OPEN, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_SESSION_CLOSE,
+        TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
+        TYPE_UPLOAD_COMPLETE,
     },
     transfer::{total_sequences_for_len, BinaryFrame, BinaryKind, Sha256Accumulator, CHUNK_SIZE},
 };
@@ -34,7 +37,6 @@ use crate::{
 
 type WsStream = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
-const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub(crate) struct CommandResponse {
@@ -268,26 +270,6 @@ impl<'a> ControlClient<'a> {
         .await
     }
 
-    pub(crate) async fn command_without_response_timeout(
-        &self,
-        request_id: &str,
-        command: &str,
-        args: Value,
-        cancel: Option<CancelFlag>,
-        on_remote_start: Option<RemoteStartHook>,
-    ) -> Result<CommandResponse> {
-        self.command_with_terminal(CommandSend {
-            request_id,
-            command,
-            args,
-            terminal_kinds: &[TYPE_COMMAND_COMPLETE],
-            wait: None,
-            cancel,
-            on_remote_start,
-        })
-        .await
-    }
-
     pub(crate) async fn cancel_command(&self, request_id: &str) -> Result<()> {
         let session = self.store.read_session()?;
         let message = WireMessage::new(
@@ -314,6 +296,61 @@ impl<'a> ControlClient<'a> {
         }
         self.store.touch_session(session)?;
         Ok(())
+    }
+
+    pub(crate) async fn start_exec_job(
+        &self,
+        task_id: &str,
+        args: Value,
+    ) -> Result<CommandStatusResultPayload> {
+        let session = self.store.read_session()?;
+        let payload = CommandRequestPayload {
+            session_token: session.session_token.clone(),
+            command: rcw_common::protocol::COMMAND_EXEC.to_owned(),
+            audit_label: self.config.audit_label.clone(),
+            args,
+        };
+        let message = WireMessage::new(
+            TYPE_COMMAND_START,
+            Some(task_id.to_owned()),
+            Some(session.session_id.clone()),
+            payload,
+        )?;
+        let messages = send_and_collect(
+            &session.server,
+            message,
+            &[TYPE_COMMAND_START_RESULT],
+            Some(config_wait_timeout(self.config)?),
+            None,
+            None,
+        )
+        .await?;
+        self.store.touch_session(session)?;
+        last_payload(&messages)
+    }
+
+    pub(crate) async fn command_status(&self, task_id: &str) -> Result<CommandStatusResultPayload> {
+        let session = self.store.read_session()?;
+        let message = WireMessage::new(
+            TYPE_COMMAND_STATUS,
+            Some(task_id.to_owned()),
+            Some(session.session_id.clone()),
+            CommandStatusPayload {
+                session_token: session.session_token.clone(),
+                task_id: task_id.to_owned(),
+            },
+        )?;
+        let messages = send_and_collect(
+            &session.server,
+            message,
+            &[TYPE_COMMAND_STATUS_RESULT],
+            Some(config_wait_timeout(self.config)?),
+            None,
+            None,
+        )
+        .await?;
+        self.store.touch_session(session)?;
+        last_payload(&messages)
     }
 
     async fn command_with_terminal(&self, send: CommandSend<'_>) -> Result<CommandResponse> {

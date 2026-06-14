@@ -3,6 +3,8 @@ mod cancel;
 mod cli;
 mod commands;
 mod controller_config;
+mod defaults;
+mod jobs;
 mod mcp;
 mod output;
 mod session;
@@ -26,8 +28,8 @@ use crate::{
     audit::append_controller_audit,
     cli::{command_name, Cli, Commands},
     commands::{
-        close_session, download_file, exec_command, open_session, screenshot, simple_command,
-        status_session, upload_file, windows,
+        close_session, download_file, exec_cancel, exec_command, exec_status, open_session,
+        screenshot, simple_command, status_session, upload_file, windows,
     },
     controller_config::ControllerConfig,
     mcp::run_mcp_server,
@@ -77,9 +79,22 @@ async fn run() -> Result<i32> {
             .await
         }
         Commands::Status => status_session(&cli, &request_id).await,
-        Commands::Exec { command, timeout } => {
-            exec_command(&cli, &request_id, command, timeout.as_deref()).await
+        Commands::Exec {
+            command,
+            timeout,
+            wait,
+        } => {
+            exec_command(
+                &cli,
+                &request_id,
+                command,
+                timeout.as_deref(),
+                wait.as_deref(),
+            )
+            .await
         }
+        Commands::ExecStatus { task_id } => exec_status(&cli, &request_id, task_id).await,
+        Commands::ExecCancel { task_id } => exec_cancel(&cli, &request_id, task_id).await,
         Commands::Upload {
             local,
             remote,

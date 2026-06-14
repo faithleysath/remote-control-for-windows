@@ -108,14 +108,22 @@ rcwctl status
 ```bash
 rcwctl exec -- pwsh -NoProfile -Command "Get-ComputerInfo"
 rcwctl exec --timeout 120s -- cmd /c dir C:\
+rcwctl exec --wait 0 -- pwsh -NoProfile -Command "Start-Sleep 30; 'done'"
+rcwctl exec-status <task_id>
+rcwctl exec-cancel <task_id>
 ```
 
 规则：
 
 - `--` 后面的内容原样作为远程进程参数。
 - 默认工作目录为被控端进程当前目录。
-- 不传 `exec --timeout` 时，远端进程不设运行上限，CLI 会一直等到远端返回完成、连接断开或用户中断。
-- `exec --timeout <duration>` 是远端进程运行上限；CLI 会等待到覆盖这个上限，避免命令还在跑就被客户端超时截断。
+- 不传 `exec --timeout` 时，远端进程默认最多运行 24 小时。
+- 不传 `exec --wait` 时，CLI 默认等 90 秒；到期仍未完成时返回 server-owned `task_id` 和当前 running 状态。
+- `exec --timeout <duration>` 是远端进程运行上限，不影响 CLI 本次等待窗口。
+- `exec --wait <duration>` 只限制本次 CLI 调用等待多久，不限制远端进程运行。
+- 如果 `--wait` 小于 `--timeout`，CLI 会先返回 running task，远端进程继续运行到完成、失败或远端 timeout。
+- 如果 `--wait` 大于 `--timeout`，host 会先按远端 timeout 结束进程，CLI 在等待窗口内看到最终 timeout/error 状态后返回。
+- `exec --wait 0` 会在 server 上创建 exec job 后立即返回 `task_id`；后续短 CLI 进程可用 `exec-status` 查询 stdout、stderr、退出码和最终状态，或用 `exec-cancel` 请求 host 杀掉对应进程树。
 - 返回远程退出码，但 CLI 本身在传输失败时返回自己的非 0 退出码。
 - 审计日志记录命令参数摘要、退出码和耗时；不默认记录完整 stdout/stderr。
 
@@ -241,19 +249,19 @@ MCP 工具：
 - `connect`：用机器 ID 和当前 TOTP 打开远控会话；可传 `force_reconnect=true` 在 TOTP 验证通过后替换旧会话。
 - `disconnect`：关闭当前远控会话。
 - `status`：查询当前会话和被控端在线状态。
-- `exec`：执行远程命令。可传 `timeout_ms` 限制远端进程运行时长；可传 `wait_timeout_ms` 限制本次 MCP tool call 等待多久，`0` 表示立即返回后台 `task_id`。
-- `exec_status`：查询后台 exec 任务状态、最终 stdout/stderr/exit_code 或错误；stdout 和 stderr 各最多保留 1 MiB，超出时通过 `stdout_truncated` / `stderr_truncated` 标记。
-- `exec_cancel`：取消后台 exec 任务，并要求被控端杀掉对应远端进程。
-- `upload`：流式读取 MCP 服务器本机路径并上传到远端路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
-- `download`：下载远端文件并流式写入 MCP 服务器本机路径。可传 `wait_timeout_ms`，超时后返回后台 `task_id`。
-- `transfer_status`：查询后台上传或下载任务的运行状态、最终结果或错误。
-- `transfer_cancel`：取消后台上传或下载任务；上传如果还在 MCP 本机 hash/校验阶段会直接本地取消，已经发到远端后会通知 host 丢弃临时上传状态；下载会通知 host 停止远端分块发送，同时中止本地写入并清理本地临时文件。
+- `exec`：执行远程命令。可传 `timeout_ms` 限制远端进程运行时长，默认 24 小时；可传 `wait_ms` 限制本次 MCP tool call 等待多久，`0` 表示立即返回 server-owned `task_id`。
+- `exec_status`：查询 server-owned exec job 状态、最终 stdout/stderr/exit_code 或错误；stdout 和 stderr 各最多保留 1 MiB，超出时通过 `stdout_truncated` / `stderr_truncated` 标记。
+- `exec_cancel`：请求取消 server-owned exec job，并要求被控端杀掉对应远端进程；返回的是取消请求投递后的当前状态，最终状态用 `exec_status` 查询。
+- `upload`：流式读取 MCP 服务器本机路径并上传到远端路径。可传 `wait_ms`，等待窗口结束后返回 MCP 进程内 `task_id`。
+- `download`：下载远端文件并流式写入 MCP 服务器本机路径。可传 `wait_ms`，等待窗口结束后返回 MCP 进程内 `task_id`。
+- `transfer_status`：查询 MCP 进程内上传或下载任务的运行状态、最终结果或错误。
+- `transfer_cancel`：取消 MCP 进程内上传或下载任务；上传如果还在 MCP 本机 hash/校验阶段会直接本地取消，已经发到远端后会通知 host 丢弃临时上传状态；下载会通知 host 停止远端分块发送，同时中止本地写入并清理本地临时文件。
 - `screenshot`：截图并写入 MCP 服务器本机路径。
 - `windows`：列出窗口。
 - `mouse_move`、`mouse_click`、`mouse_scroll`：鼠标操作。
 - `keyboard_type`、`keyboard_key`：键盘输入。
 
-`mcp` 是长期运行进程。它把打开后的 session 和后台任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`upload` / `download` 默认最多等待 60 秒；`exec` 默认最多等待 30 秒；如果任务未完成，会返回 `status=running` 和 `task_id`，之后调用对应 status 工具查询。`wait_timeout_ms=0` 表示立即转后台。后台任务可以通过对应 cancel 工具取消；已发到远端的请求只有在 server 返回 `command.cancel_result` 后，本地状态才会变为 `cancelled`。如果 server 未确认取消或返回 `error`，MCP 会返回错误并保留原任务状态；还没发到远端的本地预处理阶段可以直接本地取消。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
+`mcp` 是长期运行进程。它把打开后的 session 和传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`exec` 默认最多等待 90 秒；如果未完成，会返回 server-owned `task_id`，之后调用 `exec_status` 查询。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 MCP 进程内 `task_id`，之后调用 `transfer_status` 查询。`wait_ms=0` 表示立即返回任务状态。exec job 可以被后续 CLI 或 MCP 查询；upload/download 依赖当前 MCP 进程继续读写本地文件，不支持无 daemon 的 CLI detached transfer，也不在 MCP 进程退出后保留。已发到远端的取消请求只有在 server 返回 `command.cancel_result` 后，控制端才确认取消已投递；exec 最终状态由 host 的后续回包决定，transfer 的本地进程内状态可在确认投递后标记 cancelled。如果 server 未确认取消或返回 `error`，MCP 会返回错误并保留原任务状态；还没发到远端的本地预处理阶段可以直接本地取消。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和传输任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
 
 ## Codex 调用约定
 
@@ -270,5 +278,5 @@ rcwctl --json ...
 3. `click` 或 `type`
 4. 再次 `screenshot` 验证
 
-所有命令都必须避免进入无法退出的交互式程序。需要长时间命令时，对 CLI 显式设置 `exec --timeout`，对 MCP 使用 `exec.timeout_ms` 和 `exec.wait_timeout_ms` 表达远端运行上限与本次调用等待窗口。
+所有命令都必须避免进入无法退出的交互式程序。需要长时间命令时，对 CLI 使用 `exec --timeout` 和 `exec --wait`，对 MCP 使用 `exec.timeout_ms` 和 `exec.wait_ms` 表达远端运行上限与本次调用等待窗口。
 必要时使用 `--audit-label` 写明本次操作目的，例如 `--audit-label "collect customer app logs"`。

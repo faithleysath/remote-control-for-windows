@@ -1,9 +1,10 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::RcwResult;
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 pub const TYPE_HOST_HELLO: &str = "host.hello";
 pub const TYPE_HOST_HELLO_ACK: &str = "host.hello_ack";
@@ -20,6 +21,10 @@ pub const TYPE_SESSION_CLOSE_RESULT: &str = "session.close_result";
 pub const TYPE_COMMAND_REQUEST: &str = "command.request";
 pub const TYPE_COMMAND_OUTPUT: &str = "command.output";
 pub const TYPE_COMMAND_COMPLETE: &str = "command.complete";
+pub const TYPE_COMMAND_START: &str = "command.start";
+pub const TYPE_COMMAND_START_RESULT: &str = "command.start_result";
+pub const TYPE_COMMAND_STATUS: &str = "command.status";
+pub const TYPE_COMMAND_STATUS_RESULT: &str = "command.status_result";
 pub const TYPE_COMMAND_CANCEL: &str = "command.cancel";
 pub const TYPE_COMMAND_CANCEL_RESULT: &str = "command.cancel_result";
 pub const TYPE_UPLOAD_COMPLETE: &str = "upload.complete";
@@ -36,6 +41,9 @@ pub const COMMAND_MOUSE_CLICK: &str = "mouse.click";
 pub const COMMAND_MOUSE_SCROLL: &str = "mouse.scroll";
 pub const COMMAND_KEYBOARD_TYPE: &str = "keyboard.type";
 pub const COMMAND_KEYBOARD_KEY: &str = "keyboard.key";
+pub const DEFAULT_SCREENSHOT_FORMAT: &str = "png";
+pub const DEFAULT_MOUSE_BUTTON: &str = "left";
+pub const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
@@ -190,7 +198,7 @@ pub struct CommandOutputPayload {
     pub data: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CommandCompletePayload {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -204,18 +212,55 @@ pub struct CommandCompletePayload {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorPayload {
     pub code: ErrorCode,
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandStatusPayload {
+    pub session_token: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandStatusResultPayload {
+    pub task_id: String,
+    pub status: CommandTaskStatus,
+    pub request_id: String,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub complete: Option<CommandCompletePayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CommandCancelPayload {
     pub session_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CommandCancelResultPayload {
     pub ok: bool,
 }
@@ -297,7 +342,7 @@ pub struct WindowInfo {
     pub focused: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidToken,
@@ -375,8 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_cancel_payload_change() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn protocol_version_marks_server_exec_jobs() {
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]
@@ -403,5 +448,32 @@ mod tests {
 
         let payload: CommandCancelResultPayload = message.payload_as().unwrap();
         assert!(payload.ok);
+    }
+
+    #[test]
+    fn command_status_result_round_trips() {
+        let message = WireMessage::new(
+            TYPE_COMMAND_STATUS_RESULT,
+            Some("status-req".to_owned()),
+            Some("sess".to_owned()),
+            CommandStatusResultPayload {
+                task_id: "task".to_owned(),
+                status: CommandTaskStatus::Running,
+                request_id: "task".to_owned(),
+                started_at: "now".to_owned(),
+                finished_at: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                complete: None,
+                error: None,
+            },
+        )
+        .unwrap();
+
+        let payload: CommandStatusResultPayload = message.payload_as().unwrap();
+        assert_eq!(payload.task_id, "task");
+        assert_eq!(payload.status, CommandTaskStatus::Running);
     }
 }

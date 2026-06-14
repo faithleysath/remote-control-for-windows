@@ -8,7 +8,7 @@ use rcw_common::{
         KeyboardKeyArgs, KeyboardTypeArgs, MouseClickArgs, MouseMoveArgs, MouseScrollArgs,
         ScreenshotArgs, COMMAND_DOWNLOAD_BEGIN, COMMAND_EXEC, COMMAND_KEYBOARD_KEY,
         COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK, COMMAND_MOUSE_MOVE, COMMAND_MOUSE_SCROLL,
-        COMMAND_SCREENSHOT, COMMAND_WINDOWS,
+        COMMAND_SCREENSHOT, COMMAND_WINDOWS, DEFAULT_SCREENSHOT_FORMAT,
     },
     transfer::{sha256_bytes, BinaryKind},
 };
@@ -531,7 +531,7 @@ async fn command_screenshot(
     args: serde_json::Value,
 ) -> Result<()> {
     let args: ScreenshotArgs = serde_json::from_value(args)?;
-    if args.format != "png" {
+    if args.format != DEFAULT_SCREENSHOT_FORMAT {
         return Err(anyhow!("only png screenshots are supported"));
     }
     let bytes = platform::screenshot_png(args.display)?;

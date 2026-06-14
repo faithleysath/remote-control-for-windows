@@ -3,8 +3,8 @@ use std::{fs, io::Read, path::Path, time::Duration};
 use anyhow::{bail, Context, Result};
 use rcw_common::{
     protocol::{
-        ExecArgs, ScreenshotArgs, UploadArgs, WindowInfo, COMMAND_EXEC, COMMAND_SCREENSHOT,
-        COMMAND_WINDOWS,
+        CommandStatusResultPayload, CommandTaskStatus, ExecArgs, ScreenshotArgs, UploadArgs,
+        WindowInfo, COMMAND_SCREENSHOT, COMMAND_WINDOWS,
     },
     transfer::{
         commit_temp_output_file, create_temp_output_file, sha256_file, temp_output_path,
@@ -19,12 +19,14 @@ use crate::{
     cancel::{bail_if_cancelled, CancelFlag},
     cli::Cli,
     controller_config::{config_wait_timeout, parse_duration, ControllerConfig},
+    defaults::{DEFAULT_EXEC_TIMEOUT_MS, DEFAULT_EXEC_WAIT_MS, EXEC_STATUS_POLL_INTERVAL},
     output::{print_json, write_output_file},
     session::{FileSessionStore, SessionFile, SessionStore},
     transport::ControlClient,
 };
 
 pub(crate) type RemoteStartHook = Box<dyn FnOnce() + Send + 'static>;
+const DEFAULT_CLI_EXEC_WAIT_TIMEOUT: Duration = Duration::from_millis(DEFAULT_EXEC_WAIT_MS);
 
 pub(crate) struct ExecCommandOptions {
     pub(crate) cwd: Option<String>,
@@ -291,15 +293,16 @@ pub(crate) async fn exec_command(
     request_id: &str,
     command: &[String],
     timeout: Option<&str>,
+    wait: Option<&str>,
 ) -> Result<i32> {
     let config = ControllerConfig::from_cli(cli);
     let store = FileSessionStore::new(cli);
     let remote_timeout_ms = match timeout {
         Some(value) => Some(duration_to_millis(parse_duration(value)?)),
-        None => None,
+        None => Some(DEFAULT_EXEC_TIMEOUT_MS),
     };
-    let response_wait = exec_response_wait(remote_timeout_ms)?;
-    let result = exec_command_state(
+    let response_wait = Some(cli_exec_wait(wait)?);
+    let snapshot = exec_command_state(
         &config,
         &store,
         request_id,
@@ -315,13 +318,71 @@ pub(crate) async fn exec_command(
     .await?;
 
     if cli.json {
-        print_json(serde_json::to_value(&result)?)?;
+        print_json(serde_json::to_value(&snapshot)?)?;
     } else {
-        print!("{}", result.stdout);
-        eprint!("{}", result.stderr);
-        eprintln!("request_id: {request_id}");
+        print_exec_snapshot_text(&snapshot, request_id)?;
     }
-    Ok(result.exit_code.unwrap_or(if result.ok { 0 } else { 1 }))
+    Ok(exit_code_for_exec_snapshot(&snapshot))
+}
+
+pub(crate) async fn exec_status(cli: &Cli, _request_id: &str, task_id: &str) -> Result<i32> {
+    let config = ControllerConfig::from_cli(cli);
+    let store = FileSessionStore::new(cli);
+    let snapshot = ControlClient::new(&config, &store)
+        .command_status(task_id)
+        .await?;
+    if cli.json {
+        print_json(serde_json::to_value(&snapshot)?)?;
+        return Ok(exit_code_for_exec_snapshot(&snapshot));
+    }
+    match snapshot.status {
+        CommandTaskStatus::Running
+        | CommandTaskStatus::Completed
+        | CommandTaskStatus::Failed
+        | CommandTaskStatus::Cancelled => print_exec_snapshot_text(&snapshot, task_id)?,
+    }
+    Ok(exit_code_for_exec_snapshot(&snapshot))
+}
+
+pub(crate) async fn exec_cancel(cli: &Cli, _request_id: &str, task_id: &str) -> Result<i32> {
+    let config = ControllerConfig::from_cli(cli);
+    let store = FileSessionStore::new(cli);
+    ControlClient::new(&config, &store)
+        .cancel_command(task_id)
+        .await?;
+    let snapshot = ControlClient::new(&config, &store)
+        .command_status(task_id)
+        .await?;
+    if cli.json {
+        print_json(serde_json::to_value(&snapshot)?)?;
+    } else {
+        println!("requested cancel for exec task {task_id}");
+        println!("status: {}", command_status_label(snapshot.status));
+        println!("request_id: {}", snapshot.request_id);
+    }
+    Ok(exit_code_for_exec_snapshot(&snapshot))
+}
+
+pub(crate) async fn start_exec_job_state(
+    config: &ControllerConfig,
+    store: &dyn SessionStore,
+    request_id: &str,
+    command: &[String],
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+) -> Result<CommandStatusResultPayload> {
+    if command.is_empty() {
+        bail!("exec requires a program");
+    }
+    let args = json!(ExecArgs {
+        program: command[0].clone(),
+        argv: command[1..].to_vec(),
+        cwd,
+        timeout_ms,
+    });
+    ControlClient::new(config, store)
+        .start_exec_job(request_id, args)
+        .await
 }
 
 pub(crate) async fn exec_command_state(
@@ -330,7 +391,7 @@ pub(crate) async fn exec_command_state(
     request_id: &str,
     command: &[String],
     options: ExecCommandOptions,
-) -> Result<ExecResult> {
+) -> Result<CommandStatusResultPayload> {
     let ExecCommandOptions {
         cwd,
         timeout_ms,
@@ -338,68 +399,139 @@ pub(crate) async fn exec_command_state(
         cancel,
         on_remote_start,
     } = options;
-    if command.is_empty() {
-        bail!("exec requires a program");
-    }
-    bail_if_cancelled(cancel.as_ref())?;
-    let args = json!(ExecArgs {
-        program: command[0].clone(),
-        argv: command[1..].to_vec(),
-        cwd,
-        timeout_ms,
-    });
     let client = ControlClient::new(config, store);
-    let response = match response_wait {
-        Some(wait) => {
-            client
-                .command(
-                    request_id,
-                    COMMAND_EXEC,
-                    args,
-                    wait,
-                    cancel.clone(),
-                    on_remote_start,
-                )
-                .await?
-        }
-        None => {
-            client
-                .command_without_response_timeout(
-                    request_id,
-                    COMMAND_EXEC,
-                    args,
-                    cancel.clone(),
-                    on_remote_start,
-                )
-                .await?
-        }
+    start_exec_job_state(config, store, request_id, command, cwd, timeout_ms).await?;
+    if let Some(on_remote_start) = on_remote_start {
+        on_remote_start();
+    }
+    let snapshot = match response_wait {
+        Some(wait) => wait_for_exec_job_completion(&client, request_id, wait, cancel).await?,
+        None => wait_for_exec_job_completion_unbounded(&client, request_id, cancel).await?,
     };
-    let complete = response.complete.context("missing command.complete")?;
-    Ok(ExecResult {
-        ok: complete.ok,
-        exit_code: complete.exit_code,
-        stdout: response.stdout,
-        stderr: response.stderr,
-        stdout_truncated: response.stdout_truncated,
-        stderr_truncated: response.stderr_truncated,
-        duration_ms: complete.duration_ms,
-        request_id: request_id.to_owned(),
-    })
+    Ok(snapshot)
 }
 
 pub(crate) fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u64::MAX as u128) as u64
 }
 
-fn exec_response_wait(remote_timeout_ms: Option<u64>) -> Result<Option<Duration>> {
-    match remote_timeout_ms {
-        Some(timeout_ms) => {
-            let remote = Duration::from_millis(timeout_ms)
-                .checked_add(Duration::from_secs(10))
-                .context("exec timeout is too large")?;
-            Ok(Some(remote))
+fn cli_exec_wait(wait: Option<&str>) -> Result<Duration> {
+    match wait {
+        Some(value) => parse_duration(value),
+        None => Ok(DEFAULT_CLI_EXEC_WAIT_TIMEOUT),
+    }
+}
+
+async fn wait_for_exec_job_completion(
+    client: &ControlClient<'_>,
+    task_id: &str,
+    wait: Duration,
+    cancel: Option<CancelFlag>,
+) -> Result<CommandStatusResultPayload> {
+    let deadline = tokio::time::sleep(wait);
+    tokio::pin!(deadline);
+    loop {
+        bail_if_cancelled(cancel.as_ref())?;
+        let snapshot = client.command_status(task_id).await?;
+        if snapshot.status != CommandTaskStatus::Running {
+            return Ok(snapshot);
         }
-        None => Ok(None),
+        tokio::select! {
+            _ = &mut deadline => return Ok(snapshot),
+            _ = tokio::time::sleep(EXEC_STATUS_POLL_INTERVAL) => {}
+        }
+    }
+}
+
+async fn wait_for_exec_job_completion_unbounded(
+    client: &ControlClient<'_>,
+    task_id: &str,
+    cancel: Option<CancelFlag>,
+) -> Result<CommandStatusResultPayload> {
+    loop {
+        bail_if_cancelled(cancel.as_ref())?;
+        let snapshot = client.command_status(task_id).await?;
+        if snapshot.status != CommandTaskStatus::Running {
+            return Ok(snapshot);
+        }
+        tokio::time::sleep(EXEC_STATUS_POLL_INTERVAL).await;
+    }
+}
+
+fn exec_result_from_snapshot(snapshot: CommandStatusResultPayload) -> Result<ExecResult> {
+    if let Some(error) = snapshot.error {
+        bail!("{:?}: {}", error.code, error.message);
+    }
+    let complete = snapshot.complete.context("missing command.complete")?;
+    Ok(ExecResult {
+        ok: complete.ok,
+        exit_code: complete.exit_code,
+        stdout: snapshot.stdout,
+        stderr: snapshot.stderr,
+        stdout_truncated: snapshot.stdout_truncated,
+        stderr_truncated: snapshot.stderr_truncated,
+        duration_ms: complete.duration_ms,
+        request_id: snapshot.request_id,
+    })
+}
+
+fn print_exec_snapshot_text(snapshot: &CommandStatusResultPayload, task_id: &str) -> Result<()> {
+    match snapshot.status {
+        CommandTaskStatus::Running => {
+            println!("task_id: {}", snapshot.task_id);
+            println!("status: {}", command_status_label(snapshot.status));
+            println!("request_id: {}", snapshot.request_id);
+        }
+        CommandTaskStatus::Completed => {
+            let result = exec_result_from_snapshot(snapshot.clone())?;
+            print!("{}", result.stdout);
+            eprint!("{}", result.stderr);
+            eprintln!("task_id: {task_id}");
+            eprintln!("request_id: {}", result.request_id);
+        }
+        CommandTaskStatus::Failed | CommandTaskStatus::Cancelled => {
+            print!("{}", snapshot.stdout);
+            eprint!("{}", snapshot.stderr);
+            eprintln!("task_id: {task_id}");
+            eprintln!("status: {}", command_status_label(snapshot.status));
+            eprintln!("request_id: {}", snapshot.request_id);
+            if let Some(error) = &snapshot.error {
+                eprintln!("error: {:?}: {}", error.code, error.message);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn command_status_label(status: CommandTaskStatus) -> &'static str {
+    match status {
+        CommandTaskStatus::Running => "running",
+        CommandTaskStatus::Completed => "completed",
+        CommandTaskStatus::Failed => "failed",
+        CommandTaskStatus::Cancelled => "cancelled",
+    }
+}
+
+fn exit_code_for_exec_snapshot(snapshot: &CommandStatusResultPayload) -> i32 {
+    match snapshot.status {
+        CommandTaskStatus::Running => 0,
+        CommandTaskStatus::Completed => snapshot
+            .complete
+            .as_ref()
+            .and_then(|complete| complete.exit_code)
+            .unwrap_or_else(|| {
+                if snapshot
+                    .complete
+                    .as_ref()
+                    .map(|complete| complete.ok)
+                    .unwrap_or(false)
+                {
+                    0
+                } else {
+                    1
+                }
+            }),
+        CommandTaskStatus::Failed | CommandTaskStatus::Cancelled => 1,
     }
 }
 
@@ -775,17 +907,29 @@ pub(crate) async fn simple_command_state(
 mod tests {
     use std::time::Duration;
 
-    use super::exec_response_wait;
+    use super::cli_exec_wait;
+    use crate::defaults::DEFAULT_EXEC_TIMEOUT_MS;
 
     #[test]
-    fn exec_response_wait_is_unbounded_without_remote_timeout() {
-        let wait = exec_response_wait(None).unwrap();
-        assert_eq!(wait, None);
+    fn default_exec_timeout_is_24_hours() {
+        assert_eq!(DEFAULT_EXEC_TIMEOUT_MS, 24 * 60 * 60 * 1000);
     }
 
     #[test]
-    fn exec_response_wait_tracks_remote_timeout() {
-        let wait = exec_response_wait(Some(120_000)).unwrap();
-        assert_eq!(wait, Some(Duration::from_secs(130)));
+    fn cli_exec_wait_defaults_to_90_seconds() {
+        let wait = cli_exec_wait(None).unwrap();
+        assert_eq!(wait, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn cli_exec_wait_accepts_zero_for_immediate_return() {
+        let wait = cli_exec_wait(Some("0")).unwrap();
+        assert_eq!(wait, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn cli_exec_wait_parses_explicit_duration() {
+        let wait = cli_exec_wait(Some("5m")).unwrap();
+        assert_eq!(wait, Duration::from_secs(300));
     }
 }

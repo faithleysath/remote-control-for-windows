@@ -1,21 +1,38 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use rcw_common::protocol::{DEFAULT_MOUSE_BUTTON, DEFAULT_SCREENSHOT_FORMAT};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 pub(crate) struct Cli {
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Server HTTP/WS endpoint. Defaults to RCW_SERVER or the built-in local endpoint."
+    )]
     pub(crate) server: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Control token used to open and operate a remote-control session."
+    )]
     pub(crate) token: Option<String>,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Path to the CLI session file. MCP keeps session state in memory instead."
+    )]
     pub(crate) session: Option<PathBuf>,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Print machine-readable JSON output.")]
     pub(crate) json: bool,
-    #[arg(long, global = true)]
+    #[arg(
+        long,
+        global = true,
+        help = "Short purpose label written to controller/server/host audit logs."
+    )]
     pub(crate) audit_label: Option<String>,
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help = "Enable verbose diagnostic output.")]
     pub(crate) verbose: bool,
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -25,70 +42,133 @@ pub(crate) struct Cli {
 pub(crate) enum Commands {
     #[command(name = "connect")]
     Open {
-        #[arg(long = "id")]
+        #[arg(long = "id", help = "Target machine ID displayed by rcw-host.")]
         id: String,
-        #[arg(long)]
+        #[arg(long, help = "Current TOTP code displayed by rcw-host.")]
         totp: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Expected TOTP period in seconds. Defaults to the configured project period."
+        )]
         totp_period_seconds: Option<u64>,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Replace an existing active session for this host after TOTP verification."
+        )]
         force: bool,
     },
     Status,
     Exec {
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Maximum remote process runtime. Defaults to 24h. Examples: 500ms, 30s, 10m."
+        )]
         timeout: Option<String>,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        #[arg(
+            long,
+            help = "How long this CLI call waits for completion. Defaults to 90s; 0 returns a task_id immediately."
+        )]
+        wait: Option<String>,
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            required = true,
+            help = "Remote program and arguments to execute after `--`."
+        )]
         command: Vec<String>,
     },
+    #[command(name = "exec-status")]
+    ExecStatus {
+        #[arg(help = "Task ID returned by exec when the remote command is still running.")]
+        task_id: String,
+    },
+    #[command(name = "exec-cancel")]
+    ExecCancel {
+        #[arg(help = "Task ID returned by exec.")]
+        task_id: String,
+    },
     Upload {
+        #[arg(help = "Local file path to read and upload.")]
         local: PathBuf,
+        #[arg(help = "Destination path on the remote Windows host.")]
         remote: String,
-        #[arg(long)]
+        #[arg(long, help = "Allow replacing an existing remote file.")]
         overwrite: bool,
-        #[arg(long)]
+        #[arg(long, help = "Expected SHA-256 of the local file before upload.")]
         sha256: Option<String>,
     },
     Download {
+        #[arg(help = "Remote file path to download.")]
         remote: String,
+        #[arg(help = "Local output file path to write.")]
         local: PathBuf,
     },
     Screenshot {
-        #[arg(long)]
+        #[arg(long, help = "Local PNG output path.")]
         output: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Optional display index on the remote host.")]
         display: Option<u32>,
-        #[arg(long, default_value = "png")]
+        #[arg(
+            long,
+            default_value = DEFAULT_SCREENSHOT_FORMAT,
+            help = "Screenshot format. Currently only png is supported."
+        )]
         format: String,
     },
     Windows,
     #[command(name = "mouse-move")]
     Move {
-        #[arg(long, allow_negative_numbers = true)]
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            help = "Absolute screen X coordinate."
+        )]
         x: i32,
-        #[arg(long, allow_negative_numbers = true)]
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            help = "Absolute screen Y coordinate."
+        )]
         y: i32,
     },
     #[command(name = "mouse-click")]
     Click {
-        #[arg(long, allow_negative_numbers = true)]
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            help = "Absolute screen X coordinate."
+        )]
         x: i32,
-        #[arg(long, allow_negative_numbers = true)]
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            help = "Absolute screen Y coordinate."
+        )]
         y: i32,
-        #[arg(long, default_value = "left")]
+        #[arg(
+            long,
+            default_value = DEFAULT_MOUSE_BUTTON,
+            help = "Mouse button to click: left, right, or middle."
+        )]
         button: String,
     },
     #[command(name = "mouse-scroll")]
     Scroll {
-        #[arg(long, allow_negative_numbers = true)]
+        #[arg(
+            long,
+            allow_negative_numbers = true,
+            help = "Mouse wheel delta. Negative values scroll down."
+        )]
         delta: i32,
     },
     #[command(name = "keyboard-type")]
     Type {
+        #[arg(help = "Text to type on the remote host.")]
         text: String,
     },
     #[command(name = "keyboard-key")]
     Key {
+        #[arg(help = "Key or key chord to press, for example Enter or Control+C.")]
         key: String,
     },
     #[command(name = "disconnect")]
@@ -101,6 +181,8 @@ pub(crate) fn command_name(command: &Commands) -> &'static str {
         Commands::Open { .. } => "connect",
         Commands::Status => "status",
         Commands::Exec { .. } => "exec",
+        Commands::ExecStatus { .. } => "exec.status",
+        Commands::ExecCancel { .. } => "exec.cancel",
         Commands::Upload { .. } => "upload",
         Commands::Download { .. } => "download",
         Commands::Screenshot { .. } => "screenshot",
@@ -148,8 +230,25 @@ mod tests {
         let cli =
             Cli::try_parse_from(["rcwctl", "exec", "--timeout", "5m", "--", "cmd.exe"]).unwrap();
         match cli.command {
-            Commands::Exec { timeout, command } => {
+            Commands::Exec {
+                timeout,
+                wait,
+                command,
+            } => {
                 assert_eq!(timeout.as_deref(), Some("5m"));
+                assert!(wait.is_none());
+                assert_eq!(command, vec!["cmd.exe"]);
+            }
+            _ => panic!("expected exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_exec_wait_flag() {
+        let cli = Cli::try_parse_from(["rcwctl", "exec", "--wait", "0", "--", "cmd.exe"]).unwrap();
+        match cli.command {
+            Commands::Exec { wait, command, .. } => {
+                assert_eq!(wait.as_deref(), Some("0"));
                 assert_eq!(command, vec!["cmd.exe"]);
             }
             _ => panic!("expected exec command"),

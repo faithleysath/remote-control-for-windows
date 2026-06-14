@@ -4,27 +4,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::tasks::{
-    cancel_exec_task, cancel_transfer_task, exec_remote_started, exec_task_snapshot,
-    finish_exec_snapshot, finish_transfer_snapshot, insert_exec_task, insert_transfer_task,
-    mark_exec_remote_started, mark_transfer_remote_started, new_exec_tasks, new_transfer_tasks,
-    set_exec_handle, set_exec_snapshot, set_transfer_cleanup_path, set_transfer_handle,
-    set_transfer_snapshot, transfer_remote_started, transfer_task_snapshot, wait_for_exec_task,
-    wait_for_transfer_task, ExecTasks, TransferTasks,
-};
 use super::types::{
     ClickParams, ConnectParams, DownloadFileParams, ExecCancelParams, ExecParams, ExecStatusParams,
-    ExecTaskStatus, ExecTaskStatusResult, KeyParams, MoveParams, ScreenshotFileParams,
-    ScrollParams, TransferCancelParams, TransferKind, TransferStatusParams, TransferTaskResult,
-    TransferTaskStatus, TransferTaskStatusResult, TypeParams, UploadFileParams,
+    KeyParams, MoveParams, ScreenshotFileParams, ScrollParams, TransferCancelParams,
+    TransferStatusParams, TypeParams, UploadFileParams,
+};
+use crate::jobs::{
+    cancel_transfer_task, finish_transfer_snapshot, insert_transfer_task,
+    mark_transfer_remote_started, new_transfer_tasks, set_transfer_cleanup_path,
+    set_transfer_handle, set_transfer_snapshot, transfer_remote_started, transfer_task_snapshot,
+    wait_for_transfer_task, TransferKind, TransferTaskResult, TransferTaskStatus,
+    TransferTaskStatusResult, TransferTasks,
 };
 use anyhow::{anyhow, bail, Result};
 use rcw_common::{
     ids::new_request_id,
     protocol::{
-        KeyboardKeyArgs, KeyboardTypeArgs, MouseClickArgs, MouseMoveArgs, MouseScrollArgs,
-        COMMAND_KEYBOARD_KEY, COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK, COMMAND_MOUSE_MOVE,
-        COMMAND_MOUSE_SCROLL,
+        CommandStatusResultPayload, CommandTaskStatus, KeyboardKeyArgs, KeyboardTypeArgs,
+        MouseClickArgs, MouseMoveArgs, MouseScrollArgs, COMMAND_KEYBOARD_KEY,
+        COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK, COMMAND_MOUSE_MOVE, COMMAND_MOUSE_SCROLL,
     },
     transfer::sha256_file,
 };
@@ -36,13 +34,13 @@ use crate::{
     audit::append_controller_audit,
     cli::Cli,
     commands::{
-        close_session_state, download_file_state, exec_command_state, open_session_state,
-        screenshot_state, simple_command_state, status_session_state, upload_path_state,
-        windows_state, CloseResult, DownloadFileOptions, ExecCommandOptions, OpenSessionResult,
-        RemoteStartHook, ScreenshotFileResult, SimpleResult, StatusResult, UploadPathOptions,
-        WindowsResult,
+        close_session_state, download_file_state, open_session_state, screenshot_state,
+        simple_command_state, start_exec_job_state, status_session_state, upload_path_state,
+        windows_state, CloseResult, DownloadFileOptions, OpenSessionResult, RemoteStartHook,
+        ScreenshotFileResult, SimpleResult, StatusResult, UploadPathOptions, WindowsResult,
     },
     controller_config::ControllerConfig,
+    defaults::EXEC_STATUS_POLL_INTERVAL,
     output::write_output_file_checked,
     session::{MemorySessionStore, SessionFile, SessionStore},
     transport::ControlClient,
@@ -53,7 +51,6 @@ struct RcwMcpServer {
     config: ControllerConfig,
     session: Arc<std::sync::Mutex<Option<SessionFile>>>,
     transfers: TransferTasks,
-    exec_tasks: ExecTasks,
 }
 
 #[tool_router(server_handler)]
@@ -63,7 +60,6 @@ impl RcwMcpServer {
             config,
             session: Arc::new(std::sync::Mutex::new(None)),
             transfers: new_transfer_tasks(),
-            exec_tasks: new_exec_tasks(),
         }
     }
 
@@ -132,73 +128,34 @@ impl RcwMcpServer {
     async fn exec(
         &self,
         Parameters(params): Parameters<ExecParams>,
-    ) -> Result<Json<ExecTaskStatusResult>, String> {
+    ) -> Result<Json<CommandStatusResultPayload>, String> {
         let request_id = new_request_id();
-        let task_id = new_request_id();
         let started = Instant::now();
         let mut command = Vec::with_capacity(params.argv.len() + 1);
         command.push(params.program);
         command.extend(params.argv);
-        let started_at = rcw_common::audit::now_rfc3339();
-        insert_exec_task(
-            &self.exec_tasks,
-            ExecTaskStatusResult {
-                task_id: task_id.clone(),
-                status: ExecTaskStatus::Running,
-                request_id: request_id.clone(),
-                started_at: started_at.clone(),
-                finished_at: None,
-                result: None,
-                error: None,
-            },
-        )
-        .map_err(format_error)?;
-
-        let config = self.config.clone();
-        let store = self.store();
-        let exec_tasks = Arc::clone(&self.exec_tasks);
-        let task_id_for_task = task_id.clone();
-        let request_id_for_task = request_id.clone();
-        let timeout_ms = params.timeout_ms;
-        let cwd = params.cwd;
-        let cancel =
-            super::tasks::exec_cancel_flag(&self.exec_tasks, &task_id).map_err(format_error)?;
-        let exec_tasks_for_hook = Arc::clone(&self.exec_tasks);
-        let task_id_for_hook = task_id.clone();
-        let remote_start_hook: RemoteStartHook = Box::new(move || {
-            let _ = mark_exec_remote_started(&exec_tasks_for_hook, &task_id_for_hook);
-        });
-        let (tx, rx) = oneshot::channel();
-        let handle = tokio::spawn(async move {
-            let result = exec_command_state(
-                &config,
-                &store,
-                &request_id_for_task,
+        let result = async {
+            let initial = start_exec_job_state(
+                &self.config,
+                &self.store(),
+                &request_id,
                 &command,
-                ExecCommandOptions {
-                    cwd,
-                    timeout_ms,
-                    response_wait: None,
-                    cancel: Some(cancel),
-                    on_remote_start: Some(remote_start_hook),
-                },
+                params.cwd,
+                params.timeout_ms,
             )
-            .await;
-            let snapshot =
-                finish_exec_snapshot(task_id_for_task, request_id_for_task, started_at, result);
-            set_exec_snapshot(&exec_tasks, snapshot.clone());
-            let _ = tx.send(snapshot);
-        });
-        set_exec_handle(&self.exec_tasks, &task_id, handle).map_err(format_error)?;
-
-        let result =
-            wait_for_exec_task(&self.exec_tasks, &task_id, rx, params.wait_timeout_ms).await;
+            .await?;
+            if params.wait_ms == 0 {
+                return Ok(initial);
+            }
+            wait_for_server_exec_job(&self.config, &self.store(), &request_id, params.wait_ms).await
+        }
+        .await;
         self.audit(
             &request_id,
             "mcp.exec",
             &result,
             started.elapsed(),
-            Some(format!("task_id={task_id}")),
+            Some(format!("task_id={request_id}")),
         );
         result.map(Json).map_err(format_error)
     }
@@ -216,7 +173,7 @@ impl RcwMcpServer {
             remote_path,
             overwrite,
             sha256,
-            wait_timeout_ms,
+            wait_ms,
         } = params;
         let request_id = new_request_id();
         let task_id = new_request_id();
@@ -244,7 +201,7 @@ impl RcwMcpServer {
         let task_id_for_task = task_id.clone();
         let request_id_for_task = request_id.clone();
         let cancel =
-            super::tasks::transfer_cancel_flag(&self.transfers, &task_id).map_err(format_error)?;
+            crate::jobs::transfer_cancel_flag(&self.transfers, &task_id).map_err(format_error)?;
         let transfers_for_hook = Arc::clone(&self.transfers);
         let task_id_for_hook = task_id.clone();
         let remote_start_hook: RemoteStartHook = Box::new(move || {
@@ -286,7 +243,7 @@ impl RcwMcpServer {
         });
         set_transfer_handle(&self.transfers, &task_id, handle).map_err(format_error)?;
 
-        let result = wait_for_transfer_task(&self.transfers, &task_id, rx, wait_timeout_ms).await;
+        let result = wait_for_transfer_task(&self.transfers, &task_id, rx, wait_ms).await;
         self.audit(
             &request_id,
             "mcp.upload",
@@ -309,7 +266,7 @@ impl RcwMcpServer {
             remote_path,
             local_path,
             overwrite,
-            wait_timeout_ms,
+            wait_ms,
         } = params;
         let request_id = new_request_id();
         let task_id = new_request_id();
@@ -344,7 +301,7 @@ impl RcwMcpServer {
         let task_id_for_task = task_id.clone();
         let request_id_for_task = request_id.clone();
         let cancel =
-            super::tasks::transfer_cancel_flag(&self.transfers, &task_id).map_err(format_error)?;
+            crate::jobs::transfer_cancel_flag(&self.transfers, &task_id).map_err(format_error)?;
         let transfers_for_hook = Arc::clone(&self.transfers);
         let task_id_for_hook = task_id.clone();
         let remote_start_hook: RemoteStartHook = Box::new(move || {
@@ -385,7 +342,7 @@ impl RcwMcpServer {
         });
         set_transfer_handle(&self.transfers, &task_id, handle).map_err(format_error)?;
 
-        let result = wait_for_transfer_task(&self.transfers, &task_id, rx, wait_timeout_ms).await;
+        let result = wait_for_transfer_task(&self.transfers, &task_id, rx, wait_ms).await;
         self.audit(
             &request_id,
             "mcp.download",
@@ -473,9 +430,11 @@ impl RcwMcpServer {
     async fn exec_status(
         &self,
         Parameters(params): Parameters<ExecStatusParams>,
-    ) -> Result<Json<ExecTaskStatusResult>, String> {
+    ) -> Result<Json<CommandStatusResultPayload>, String> {
         let started = Instant::now();
-        let result = exec_task_snapshot(&self.exec_tasks, &params.task_id);
+        let result = ControlClient::new(&self.config, &self.store())
+            .command_status(&params.task_id)
+            .await;
         let request_id = result
             .as_ref()
             .map(|snapshot| snapshot.request_id.as_str())
@@ -492,40 +451,26 @@ impl RcwMcpServer {
 
     #[tool(
         name = "exec_cancel",
-        description = "Cancel a running background exec task and kill the remote process."
+        description = "Request cancellation for a server-owned background exec task and return its current status."
     )]
     async fn exec_cancel(
         &self,
         Parameters(params): Parameters<ExecCancelParams>,
-    ) -> Result<Json<ExecTaskStatusResult>, String> {
+    ) -> Result<Json<CommandStatusResultPayload>, String> {
         let started = Instant::now();
-        let snapshot = exec_task_snapshot(&self.exec_tasks, &params.task_id);
-        if let Ok(snapshot) = &snapshot {
-            let remote_started =
-                exec_remote_started(&self.exec_tasks, &params.task_id).unwrap_or(false);
-            if snapshot.status == ExecTaskStatus::Running && remote_started {
-                if let Err(err) = ControlClient::new(&self.config, &self.store())
-                    .cancel_command(&snapshot.request_id)
-                    .await
-                {
-                    let result: Result<ExecTaskStatusResult> =
-                        Err(anyhow!("failed to send remote exec cancel: {err:#}"));
-                    self.audit(
-                        &snapshot.request_id,
-                        "mcp.exec_cancel",
-                        &result,
-                        started.elapsed(),
-                        Some(format!("task_id={}", params.task_id)),
-                    );
-                    return result.map(Json).map_err(format_error);
-                }
-            }
+        let result = async {
+            ControlClient::new(&self.config, &self.store())
+                .cancel_command(&params.task_id)
+                .await?;
+            ControlClient::new(&self.config, &self.store())
+                .command_status(&params.task_id)
+                .await
         }
-        let audit_request_id = snapshot
+        .await;
+        let audit_request_id = result
             .as_ref()
             .map(|snapshot| snapshot.request_id.clone())
             .unwrap_or_else(|_| params.task_id.clone());
-        let result = cancel_exec_task(&self.exec_tasks, &params.task_id);
         self.audit(
             &audit_request_id,
             "mcp.exec_cancel",
@@ -722,6 +667,28 @@ pub(crate) async fn run_mcp_server(cli: &Cli) -> Result<i32> {
 
 fn format_error(error: anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+async fn wait_for_server_exec_job(
+    config: &ControllerConfig,
+    store: &dyn SessionStore,
+    task_id: &str,
+    wait_ms: u64,
+) -> Result<CommandStatusResultPayload> {
+    let deadline = tokio::time::sleep(Duration::from_millis(wait_ms));
+    tokio::pin!(deadline);
+    loop {
+        let snapshot = ControlClient::new(config, store)
+            .command_status(task_id)
+            .await?;
+        if snapshot.status != CommandTaskStatus::Running {
+            return Ok(snapshot);
+        }
+        tokio::select! {
+            _ = &mut deadline => return Ok(snapshot),
+            _ = tokio::time::sleep(EXEC_STATUS_POLL_INTERVAL) => {}
+        }
+    }
 }
 
 impl RcwMcpServer {

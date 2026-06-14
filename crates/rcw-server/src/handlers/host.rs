@@ -10,9 +10,10 @@ use rcw_common::{
     audit::AuditEvent,
     ids::{new_session_id, new_session_token},
     protocol::{
-        ControlOpenResultPayload, ErrorCode, HostAuthResultPayload, HostHelloAckPayload,
-        HostHelloPayload, HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage,
-        PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT,
+        CommandCompletePayload, CommandOutputPayload, ControlOpenResultPayload, ErrorCode,
+        ErrorPayload, HostAuthResultPayload, HostHelloAckPayload, HostHelloPayload,
+        HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage, PROTOCOL_VERSION,
+        TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT,
         TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO,
         TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
         TYPE_UPLOAD_COMPLETE,
@@ -289,7 +290,16 @@ async fn close_existing_sessions_for_force_reconnect(
     machine_id: &str,
     request_id: &str,
 ) {
-    let removed_sessions = state.inner.remove_sessions_for_machine(machine_id).await;
+    let removed_sessions = state
+        .inner
+        .remove_sessions_for_machine(
+            machine_id,
+            rcw_common::protocol::ErrorPayload {
+                code: ErrorCode::Cancelled,
+                message: "session replaced by force reconnect".to_owned(),
+            },
+        )
+        .await;
     if removed_sessions.is_empty() {
         return;
     }
@@ -342,12 +352,21 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
         warn!("host response without session_id from {machine_id}");
         return;
     };
+    let is_detached = match request_id.as_deref() {
+        Some(request_id) => state.inner.request_route_is_detached(request_id).await,
+        None => false,
+    };
+    if is_detached {
+        if let Some(request_id) = &request_id {
+            record_detached_exec_response(state, request_id, &message).await;
+        }
+    }
     let mut controller_tx = if let Some(request_id) = &request_id {
         state.inner.controller_for_request(request_id).await
     } else {
         None
     };
-    if controller_tx.is_none() {
+    if controller_tx.is_none() && !is_detached {
         controller_tx = state
             .inner
             .session_controller_for_machine(&session_id, machine_id)
@@ -369,6 +388,30 @@ async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMe
         if let Some(request_id) = request_id {
             state.inner.clear_request_route(&request_id).await;
         }
+    }
+}
+
+async fn record_detached_exec_response(state: &AppState, request_id: &str, message: &WireMessage) {
+    match message.kind.as_str() {
+        TYPE_COMMAND_OUTPUT => {
+            if let Ok(output) = message.payload_as::<CommandOutputPayload>() {
+                state
+                    .inner
+                    .append_exec_job_output(request_id, &output.stream, &output.data)
+                    .await;
+            }
+        }
+        TYPE_COMMAND_COMPLETE => {
+            if let Ok(complete) = message.payload_as::<CommandCompletePayload>() {
+                state.inner.finish_exec_job(request_id, complete).await;
+            }
+        }
+        TYPE_ERROR => {
+            if let Ok(error) = message.payload_as::<ErrorPayload>() {
+                state.inner.fail_exec_job(request_id, error).await;
+            }
+        }
+        _ => {}
     }
 }
 

@@ -20,11 +20,12 @@ use rcw_common::{
     ids::token_label,
     protocol::{
         CommandCancelPayload, CommandCancelResultPayload, CommandRequestPayload,
-        ControlOpenPayload, ErrorCode, HostAuthRequestPayload, HostSessionClosedPayload,
-        SessionClosePayload, SessionCloseResultPayload, SessionStatusPayload,
-        SessionStatusResultPayload, WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL,
-        TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_REQUEST, TYPE_CONTROL_OPEN,
-        TYPE_HOST_AUTH_REQUEST, TYPE_HOST_SESSION_CLOSED, TYPE_SESSION_CLOSE,
+        CommandStatusPayload, ControlOpenPayload, ErrorCode, HostAuthRequestPayload,
+        HostSessionClosedPayload, SessionClosePayload, SessionCloseResultPayload,
+        SessionStatusPayload, SessionStatusResultPayload, WireMessage, PROTOCOL_VERSION,
+        TYPE_COMMAND_CANCEL, TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_REQUEST, TYPE_COMMAND_START,
+        TYPE_COMMAND_START_RESULT, TYPE_COMMAND_STATUS, TYPE_COMMAND_STATUS_RESULT,
+        TYPE_CONTROL_OPEN, TYPE_HOST_AUTH_REQUEST, TYPE_HOST_SESSION_CLOSED, TYPE_SESSION_CLOSE,
         TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
     },
     transfer::BinaryFrame,
@@ -74,6 +75,8 @@ async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage)
         TYPE_SESSION_STATUS => handle_session_status(state, tx, message).await,
         TYPE_SESSION_CLOSE => handle_session_close(state, tx, message).await,
         TYPE_COMMAND_REQUEST => handle_command_request(state, tx, message).await,
+        TYPE_COMMAND_START => handle_command_start(state, tx, message).await,
+        TYPE_COMMAND_STATUS => handle_command_status(state, tx, message).await,
         TYPE_COMMAND_CANCEL => handle_command_cancel(state, tx, message).await,
         other => send_error(
             tx,
@@ -110,7 +113,15 @@ async fn handle_command_cancel(state: &AppState, tx: &Tx, message: WireMessage) 
             return;
         }
     };
-    let Some(session_id) = state.inner.request_session_id(&request_id_value).await else {
+    let route = match state.inner.request_session_id(&request_id_value).await {
+        Some(session_id) => Some((session_id, false)),
+        None => state
+            .inner
+            .exec_job_route_if_valid(&request_id_value, &payload.session_token)
+            .await
+            .map(|(_, session_id)| (session_id, true)),
+    };
+    let Some((session_id, _from_job)) = route else {
         send_error(
             tx,
             request_id,
@@ -165,6 +176,45 @@ async fn handle_command_cancel(state: &AppState, tx: &Tx, message: WireMessage) 
         CommandCancelResultPayload { ok: true },
     )
     .expect("command cancel result serializes");
+    send_text(tx, result);
+}
+
+async fn handle_command_status(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<CommandStatusPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                message.session_id.clone(),
+                ErrorCode::InternalError,
+                &format!("invalid command.status payload: {err}"),
+            );
+            return;
+        }
+    };
+    let Some(snapshot) = state
+        .inner
+        .exec_job_if_valid(&payload.task_id, &payload.session_token)
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            message.session_id,
+            ErrorCode::SessionExpired,
+            "command.status has no active exec job",
+        );
+        return;
+    };
+    let result = WireMessage::new(
+        TYPE_COMMAND_STATUS_RESULT,
+        request_id,
+        message.session_id,
+        snapshot,
+    )
+    .expect("command status result serializes");
     send_text(tx, result);
 }
 
@@ -588,6 +638,133 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
             audit_label: payload.audit_label,
             result: Some("relayed".to_owned()),
             ..AuditEvent::new("server", "command.relay")
+        },
+    );
+}
+
+async fn handle_command_start(state: &AppState, tx: &Tx, mut message: WireMessage) {
+    let Some(task_id) = message.request_id.clone() else {
+        send_error(
+            tx,
+            None,
+            message.session_id.clone(),
+            ErrorCode::InternalError,
+            "command.start requires request_id",
+        );
+        return;
+    };
+    let Some(session_id) = message.session_id.clone() else {
+        send_error(
+            tx,
+            Some(task_id),
+            None,
+            ErrorCode::SessionExpired,
+            "missing session_id",
+        );
+        return;
+    };
+    let payload = match message.payload_as::<CommandRequestPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                Some(task_id),
+                Some(session_id),
+                ErrorCode::InternalError,
+                &format!("invalid command.start payload: {err}"),
+            );
+            return;
+        }
+    };
+    if payload.command != rcw_common::protocol::COMMAND_EXEC {
+        send_error(
+            tx,
+            Some(task_id),
+            Some(session_id),
+            ErrorCode::UnsupportedCommand,
+            "command.start only supports exec",
+        );
+        return;
+    }
+
+    let session = state
+        .inner
+        .session_if_valid(&session_id, &payload.session_token)
+        .await;
+    let Some(session) = session else {
+        send_error(
+            tx,
+            Some(task_id),
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        );
+        return;
+    };
+    let Some(host_tx) = state.inner.host_tx(&session.machine_id).await else {
+        send_error(
+            tx,
+            Some(task_id),
+            Some(session.session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+
+    let snapshot = state
+        .inner
+        .create_exec_job(
+            task_id.clone(),
+            session.machine_id.clone(),
+            session.session_id.clone(),
+            payload.session_token.clone(),
+            rcw_common::audit::now_rfc3339(),
+        )
+        .await;
+    message.kind = TYPE_COMMAND_REQUEST.to_owned();
+    message.session_id = Some(session.session_id.clone());
+    state
+        .inner
+        .track_detached_request_route(task_id.clone(), session.session_id.clone(), tx.clone())
+        .await;
+    if !send_text(&host_tx, message) {
+        let error = rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::HostDisconnected,
+            message: ErrorCode::HostDisconnected.message().to_owned(),
+        };
+        state.inner.fail_exec_job(&task_id, error).await;
+        state.inner.clear_request_route(&task_id).await;
+        send_error(
+            tx,
+            Some(task_id),
+            Some(session.session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    }
+
+    let result = WireMessage::new(
+        TYPE_COMMAND_START_RESULT,
+        Some(task_id.clone()),
+        Some(session.session_id.clone()),
+        snapshot,
+    )
+    .expect("command start result serializes");
+    send_text(tx, result);
+
+    audit(
+        state,
+        AuditEvent {
+            machine_id: Some(session.machine_id),
+            session_id: Some(session.session_id),
+            request_id: Some(task_id),
+            command: Some(payload.command),
+            audit_label: payload.audit_label,
+            result: Some("started".to_owned()),
+            summary: Some("detached exec job".to_owned()),
+            ..AuditEvent::new("server", "command.start")
         },
     );
 }
