@@ -13,6 +13,7 @@
 - [CLI 参考](cli.md)：`rcwctl` 命令、全局参数、session 行为和 Codex 调用约定。
 - [配置说明](configuration.md)：环境变量、编译期嵌入默认值、审计路径和服务部署说明。
 - [测试与验证](testing.md)：本地检查、Windows VM E2E 计划、当前验证证据和剩余验证缺口。
+- [v0.1.6 E2E 测试报告](e2e-v0.1.6.md)：协议 v4、host identity/routing、后台 exec、MCP 文件传输和取消语义的实机验证记录。
 - [发布流程](release.md)：发布清单、产物、交叉构建命令和验证要求。
 
 ## 维护者参考

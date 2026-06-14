@@ -4,7 +4,9 @@
 
 ## 当前验证记录
 
-2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。当前代码协议版本为 v4；涉及 host identity/routing、`command.start`、`command.status`、server-owned 后台 exec、CLI/MCP exec 取消和 MCP 文件传输取消的场景需要重新实机验证。
+2026-06-14，`0.1.6` 在 `win11-data` Windows-in-Docker VM 和 zhang `rcw-server` 上完成协议 v4 实机 E2E。覆盖 host identity/routing、运行期 `host_id`、host 单实例锁、CLI/MCP `--host-id` 精确连接、`HostBusy`、force reconnect、同 session 并发 exec、server-owned 后台 exec 查询/取消、MCP upload/download 后台任务和 transfer cancel、截图、窗口枚举、鼠标键盘、电源请求和剪贴板安全边界。详细记录见 [v0.1.6 E2E 测试报告](e2e-v0.1.6.md)。
+
+2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。该记录早于协议 v4 的 host identity/routing、`command.start`、`command.status`、server-owned 后台 exec、CLI/MCP exec 取消和 MCP 文件传输取消刷新；这些场景以 2026-06-14 的 `0.1.6` E2E 报告为准。
 
 已验证：
 

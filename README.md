@@ -19,17 +19,13 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 ## 当前状态
 
-当前代码主链路已经实现，早期基线在 2026-06-11 完成过 Windows VM 实机验证：
+当前代码主链路已经实现，`0.1.6` 在 2026-06-14 完成过 Windows VM 实机验证：
 
 - 本地 Rust 检查：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`。
 - Linux 上通过 `cargo-xwin` 交叉构建静态 CRT 的 Windows 被控端。
-- Windows VM 实机 E2E：会话 `connect/status/disconnect`、错误 token/TOTP/TOTP 周期处理、命令执行、命令超时清理、上传/下载 SHA-256、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
+- Windows VM 实机 E2E：会话 `connect/status/disconnect`、错误 token/TOTP、`HostBusy`、force reconnect、运行期 `host_id` 精确连接、host 单实例锁、命令执行、同 session 并发、后台 exec 查询/取消、命令超时清理、上传/下载 SHA-256、MCP 文件传输后台任务和取消、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
 
-已实现但仍需刷新实机验证的项：
-
-- 协议 v4 的 host identity/routing、`command.start` / `command.status` server-owned exec job。
-- CLI/MCP 的后台 exec 查询和取消。
-- MCP 进程内 upload/download 后台任务和取消路径。
+详细 E2E 记录见 [docs/e2e-v0.1.6.md](docs/e2e-v0.1.6.md)。
 
 仍需补齐的早期验证项：
 
