@@ -34,6 +34,7 @@ use crate::{
     controller_config::ControllerConfig,
     mcp::run_mcp_server,
     session::FileSessionStore,
+    transport::OpenSessionRequest,
 };
 
 #[tokio::main]
@@ -63,6 +64,7 @@ async fn run() -> Result<i32> {
     let result = match &cli.command {
         Commands::Open {
             id,
+            host_id,
             totp,
             totp_period_seconds,
             force,
@@ -70,11 +72,14 @@ async fn run() -> Result<i32> {
             open_session(
                 &cli,
                 &FileSessionStore::new(&cli),
-                &request_id,
-                id,
-                totp,
-                *totp_period_seconds,
-                *force,
+                OpenSessionRequest {
+                    request_id: &request_id,
+                    machine_id: id,
+                    host_id: host_id.as_deref(),
+                    totp,
+                    explicit_period: *totp_period_seconds,
+                    force_reconnect: *force,
+                },
             )
             .await
         }

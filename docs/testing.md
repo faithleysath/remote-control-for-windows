@@ -4,7 +4,7 @@
 
 ## 当前验证记录
 
-2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。当前代码协议版本为 v3；涉及 `command.start`、`command.status`、server-owned 后台 exec、CLI/MCP exec 取消和 MCP 文件传输取消的场景需要重新实机验证。
+2026-06-11，早期基线在维护者本机的 Windows-in-Docker VM 中完成实机验证。`rcw-host.exe` 由 Linux 交叉构建后复制进 Windows VM；`rcw-server` 和 `rcwctl` 运行在 Linux 主机。当前代码协议版本为 v4；涉及 host identity/routing、`command.start`、`command.status`、server-owned 后台 exec、CLI/MCP exec 取消和 MCP 文件传输取消的场景需要重新实机验证。
 
 已验证：
 
@@ -77,6 +77,12 @@ rcw-server
 export RCW_SERVER_URL=ws://<server-ip>:7800
 export RCW_CONTROL_TOKEN=test-control-token
 rcwctl connect --id <machine-id> --totp <totp>
+```
+
+短 `machine_id` 冲突或需要精确寻址时：
+
+```bash
+rcwctl connect --id <machine-id> --host-id <host-id> --totp <totp>
 ```
 
 ## E2E 清单

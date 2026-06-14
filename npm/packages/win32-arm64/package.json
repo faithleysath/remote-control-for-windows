@@ -1,6 +1,6 @@
 {
   "name": "rcwctl-windows-arm64",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Prebuilt rcwctl binary for Windows arm64",
   "license": "MIT",
   "repository": {

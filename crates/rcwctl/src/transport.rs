@@ -136,8 +136,19 @@ impl UploadSendOutcome {
 pub(crate) struct OpenedSession {
     pub(crate) server: String,
     pub(crate) machine_id: String,
+    pub(crate) host_id: String,
     pub(crate) session_id: String,
     pub(crate) session_token: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OpenSessionRequest<'a> {
+    pub(crate) request_id: &'a str,
+    pub(crate) machine_id: &'a str,
+    pub(crate) host_id: Option<&'a str>,
+    pub(crate) totp: &'a str,
+    pub(crate) explicit_period: Option<u64>,
+    pub(crate) force_reconnect: bool,
 }
 
 pub(crate) struct ControlClient<'a> {
@@ -152,27 +163,24 @@ impl<'a> ControlClient<'a> {
 
     pub(crate) async fn open_session(
         &self,
-        request_id: &str,
-        machine_id: &str,
-        totp: &str,
-        explicit_period: Option<u64>,
-        force_reconnect: bool,
+        request: OpenSessionRequest<'_>,
         wait: Duration,
     ) -> Result<OpenedSession> {
         let server = config::resolve_server_url(self.config.server.as_deref())?;
         let token = config::control_token(self.config.token.as_deref())?;
-        let period = config::resolve_totp_period_seconds(explicit_period)?;
+        let period = config::resolve_totp_period_seconds(request.explicit_period)?;
         let message = WireMessage::new(
             TYPE_CONTROL_OPEN,
-            Some(request_id.to_owned()),
+            Some(request.request_id.to_owned()),
             None,
             ControlOpenPayload {
                 protocol_version: PROTOCOL_VERSION,
                 control_token: token,
-                machine_id: machine_id.to_owned(),
-                totp: totp.to_owned(),
+                machine_id: request.machine_id.to_owned(),
+                host_id: request.host_id.map(ToOwned::to_owned),
+                totp: request.totp.to_owned(),
                 totp_period_seconds: period,
-                force_reconnect,
+                force_reconnect: request.force_reconnect,
             },
         )?;
         let messages = send_and_collect(
@@ -188,6 +196,7 @@ impl<'a> ControlClient<'a> {
         Ok(OpenedSession {
             server,
             machine_id: result.machine_id,
+            host_id: result.host_id,
             session_id: result.session_id,
             session_token: result.session_token,
         })

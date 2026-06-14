@@ -69,15 +69,22 @@ rcwctl [GLOBAL_OPTIONS] <COMMAND>
 建立会话。
 
 ```bash
-rcwctl connect --id 8K4F-2M7Q --totp 183942
+rcwctl connect --id 8A4F-2B7C-91D0 --totp 183942
 ```
 
 成功后写入本地会话文件。
 同时写入控制端审计日志。
+`--id` 是被控端显示的短 `machine_id`。如果短码冲突，被控端窗口和剪贴板连接信息还会显示当前运行期 `Host ID`，控制端可以额外传 `--host-id` 精确寻址：
+
+```bash
+rcwctl connect --id 8A4F-2B7C-91D0 --host-id host_QbYx... --totp 183942
+```
+
+`Host ID` 只用于选择目标在线 host，不替代 TOTP 或控制端 token。
 如果服务端仍保留同一被控端的旧会话，而现场用户已经给出新的 TOTP，可以使用 `--force` 在 TOTP 验证通过后替换旧会话：
 
 ```bash
-rcwctl connect --id 8K4F-2M7Q --totp 183942 --force
+rcwctl connect --id 8A4F-2B7C-91D0 --totp 183942 --force
 ```
 
 JSON 输出：
@@ -86,7 +93,8 @@ JSON 输出：
 {
   "ok": true,
   "session_id": "01HY...",
-  "machine_id": "8K4F-2M7Q",
+  "machine_id": "8A4F-2B7C-91D0",
+  "host_id": "host_QbYx...",
   "server": "wss://remote.example.com"
 }
 ```

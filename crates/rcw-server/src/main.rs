@@ -82,7 +82,11 @@ async fn session_sweeper(state: AppState) {
         interval.tick().await;
         let removed_sessions = state.inner.prune_stale(std::time::Instant::now()).await;
         for session in removed_sessions {
-            if let Some(host_tx) = state.inner.host_tx(&session.machine_id).await {
+            if let Some(host_tx) = state
+                .inner
+                .host_tx(&session.host_id, &session.connection_id)
+                .await
+            {
                 match WireMessage::new(
                     TYPE_HOST_SESSION_CLOSED,
                     None,
@@ -102,6 +106,7 @@ async fn session_sweeper(state: AppState) {
                 &state,
                 AuditEvent {
                     machine_id: Some(session.machine_id),
+                    host_id: Some(session.host_id),
                     session_id: Some(session.session_id),
                     result: Some("closed".to_owned()),
                     summary: Some("session idle timeout".to_owned()),

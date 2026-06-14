@@ -1,6 +1,6 @@
 use crate::{
     audit,
-    state::PendingOpen,
+    state::{CreateExecJob, HostLookup, PendingOpen},
     ws::{
         log_websocket_read_error, outbound_channel, send_binary, send_error, send_text,
         spawn_writer, Tx,
@@ -119,7 +119,7 @@ async fn handle_command_cancel(state: &AppState, tx: &Tx, message: WireMessage) 
             .inner
             .exec_job_route_if_valid(&request_id_value, &payload.session_token)
             .await
-            .map(|(_, session_id)| (session_id, true)),
+            .map(|(_, _, session_id)| (session_id, true)),
     };
     let Some((session_id, _from_job)) = route else {
         send_error(
@@ -145,9 +145,12 @@ async fn handle_command_cancel(state: &AppState, tx: &Tx, message: WireMessage) 
         );
         return;
     };
-    let machine_id = session.machine_id.clone();
     let session_id = session.session_id.clone();
-    let Some(host_tx) = state.inner.host_tx(&machine_id).await else {
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    else {
         send_error(
             tx,
             request_id,
@@ -233,8 +236,8 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         }
     };
     let request_id = frame.request_id.clone();
-    let session_id = state.inner.request_session_id(&request_id).await;
-    let Some(session_id) = session_id else {
+    let route = state.inner.request_route(&request_id).await;
+    let Some(route) = route else {
         send_error(
             tx,
             Some(request_id),
@@ -244,22 +247,36 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         );
         return;
     };
-    let Some((machine_id, session_id)) = state.inner.command_route(&session_id).await else {
+    let Some(session) = state.inner.command_route(&route.session_id).await else {
         send_error(
             tx,
             Some(request_id),
-            Some(session_id),
+            Some(route.session_id),
             ErrorCode::SessionExpired,
             ErrorCode::SessionExpired.message(),
         );
         return;
     };
-    state.inner.touch_session(&session_id).await;
-    let Some(host_tx) = state.inner.host_tx(&machine_id).await else {
+    if session.host_id != route.host_id || session.connection_id != route.connection_id {
         send_error(
             tx,
             Some(request_id),
-            Some(session_id),
+            Some(session.session_id),
+            ErrorCode::SessionExpired,
+            "binary frame route does not match session host",
+        );
+        return;
+    }
+    state.inner.touch_session(&session.session_id).await;
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    else {
+        send_error(
+            tx,
+            Some(request_id),
+            Some(session.session_id),
             ErrorCode::HostDisconnected,
             ErrorCode::HostDisconnected.message(),
         );
@@ -325,16 +342,56 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     }
 
-    let host = state.inner.host(&open.machine_id).await;
-    let Some(host) = host else {
-        send_error(
-            tx,
-            request_id,
-            None,
-            ErrorCode::HostNotFound,
-            ErrorCode::HostNotFound.message(),
-        );
-        return;
+    let host = if let Some(host_id) = open.host_id.as_deref() {
+        let Some(host) = state.inner.host(host_id).await else {
+            send_error(
+                tx,
+                request_id,
+                None,
+                ErrorCode::HostNotFound,
+                "host id is not online",
+            );
+            return;
+        };
+        if host.machine_id != open.machine_id {
+            send_error(
+                tx,
+                request_id,
+                None,
+                ErrorCode::HostNotFound,
+                "host id does not match machine id",
+            );
+            return;
+        }
+        host
+    } else {
+        match state.inner.host_for_machine_id(&open.machine_id).await {
+            HostLookup::Found(host) => host,
+            HostLookup::NotFound => {
+                send_error(
+                    tx,
+                    request_id,
+                    None,
+                    ErrorCode::HostNotFound,
+                    ErrorCode::HostNotFound.message(),
+                );
+                return;
+            }
+            HostLookup::Ambiguous(matches) => {
+                send_error(
+                    tx,
+                    request_id,
+                    None,
+                    ErrorCode::HostBusy,
+                    &format!(
+                        "short machine ID {} matches {} online hosts; pass host_id to select one",
+                        open.machine_id,
+                        matches.len()
+                    ),
+                );
+                return;
+            }
+        }
     };
 
     if host.totp_period_seconds != open.totp_period_seconds {
@@ -348,7 +405,7 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     }
 
-    if !open.force_reconnect && state.inner.host_has_active_session(&open.machine_id).await {
+    if !open.force_reconnect && state.inner.host_has_active_session(&host.host_id).await {
         send_error(
             tx,
             request_id,
@@ -375,7 +432,9 @@ async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {
         .insert_pending_open(
             request_id.clone(),
             PendingOpen {
+                host_id: host.host_id.clone(),
                 machine_id: open.machine_id.clone(),
+                connection_id: host.connection_id.clone(),
                 controller_tx: tx.clone(),
                 controller_label: controller_label.clone(),
                 force_reconnect: open.force_reconnect,
@@ -448,7 +507,11 @@ async fn handle_session_status(state: &AppState, tx: &Tx, message: WireMessage) 
         );
         return;
     };
-    let host_online = state.inner.host_tx(&session.machine_id).await.is_some();
+    let host_online = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+        .is_some();
     let result = WireMessage::new(
         TYPE_SESSION_STATUS_RESULT,
         request_id,
@@ -506,7 +569,11 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
         return;
     };
 
-    if let Some(host_tx) = state.inner.host_tx(&session.machine_id).await {
+    if let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    {
         let closed = WireMessage::new(
             TYPE_HOST_SESSION_CLOSED,
             request_id.clone(),
@@ -536,6 +603,7 @@ async fn handle_session_close(state: &AppState, tx: &Tx, message: WireMessage) {
         state,
         AuditEvent {
             machine_id: Some(session.machine_id),
+            host_id: Some(session.host_id),
             session_id: Some(session.session_id),
             request_id,
             result: Some("ok".to_owned()),
@@ -596,11 +664,15 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
         return;
     };
 
-    let Some(host_tx) = state.inner.host_tx(&session.machine_id).await else {
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    else {
         send_error(
             tx,
             request_id,
-            Some(session.session_id),
+            Some(session.session_id.clone()),
             ErrorCode::HostDisconnected,
             ErrorCode::HostDisconnected.message(),
         );
@@ -610,18 +682,14 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
     message.session_id = Some(session.session_id.clone());
     state
         .inner
-        .track_request_route(
-            request_id_value.clone(),
-            session.session_id.clone(),
-            tx.clone(),
-        )
+        .track_request_route(request_id_value.clone(), &session, tx.clone())
         .await;
     if !send_text(&host_tx, message) {
         state.inner.clear_request_route(&request_id_value).await;
         send_error(
             tx,
             request_id,
-            Some(session.session_id),
+            Some(session.session_id.clone()),
             ErrorCode::HostDisconnected,
             ErrorCode::HostDisconnected.message(),
         );
@@ -632,6 +700,7 @@ async fn handle_command_request(state: &AppState, tx: &Tx, mut message: WireMess
         state,
         AuditEvent {
             machine_id: Some(session.machine_id),
+            host_id: Some(session.host_id),
             session_id: Some(session.session_id),
             request_id,
             command: Some(payload.command),
@@ -701,11 +770,15 @@ async fn handle_command_start(state: &AppState, tx: &Tx, mut message: WireMessag
         );
         return;
     };
-    let Some(host_tx) = state.inner.host_tx(&session.machine_id).await else {
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    else {
         send_error(
             tx,
             Some(task_id),
-            Some(session.session_id),
+            Some(session.session_id.clone()),
             ErrorCode::HostDisconnected,
             ErrorCode::HostDisconnected.message(),
         );
@@ -714,19 +787,20 @@ async fn handle_command_start(state: &AppState, tx: &Tx, mut message: WireMessag
 
     let snapshot = state
         .inner
-        .create_exec_job(
-            task_id.clone(),
-            session.machine_id.clone(),
-            session.session_id.clone(),
-            payload.session_token.clone(),
-            rcw_common::audit::now_rfc3339(),
-        )
+        .create_exec_job(CreateExecJob {
+            task_id: task_id.clone(),
+            host_id: session.host_id.clone(),
+            connection_id: session.connection_id.clone(),
+            session_id: session.session_id.clone(),
+            session_token: payload.session_token.clone(),
+            started_at: rcw_common::audit::now_rfc3339(),
+        })
         .await;
     message.kind = TYPE_COMMAND_REQUEST.to_owned();
     message.session_id = Some(session.session_id.clone());
     state
         .inner
-        .track_detached_request_route(task_id.clone(), session.session_id.clone(), tx.clone())
+        .track_detached_request_route(task_id.clone(), &session, tx.clone())
         .await;
     if !send_text(&host_tx, message) {
         let error = rcw_common::protocol::ErrorPayload {
@@ -758,6 +832,7 @@ async fn handle_command_start(state: &AppState, tx: &Tx, mut message: WireMessag
         state,
         AuditEvent {
             machine_id: Some(session.machine_id),
+            host_id: Some(session.host_id),
             session_id: Some(session.session_id),
             request_id: Some(task_id),
             command: Some(payload.command),

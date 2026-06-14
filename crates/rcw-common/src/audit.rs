@@ -20,6 +20,8 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -42,6 +44,7 @@ impl AuditEvent {
             side: side.into(),
             event: event.into(),
             machine_id: None,
+            host_id: None,
             session_id: None,
             request_id: None,
             command: None,

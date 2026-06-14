@@ -27,7 +27,7 @@ rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 
 已实现但仍需刷新实机验证的项：
 
-- 协议 v3 的 `command.start` / `command.status` server-owned exec job。
+- 协议 v4 的 host identity/routing、`command.start` / `command.status` server-owned exec job。
 - CLI/MCP 的后台 exec 查询和取消。
 - MCP 进程内 upload/download 后台任务和取消路径。
 
@@ -83,6 +83,12 @@ rcwctl status
 rcwctl exec -- pwsh -NoProfile -Command "hostname"
 rcwctl screenshot --output screen.png
 rcwctl disconnect
+```
+
+如果现场短 `machine_id` 冲突，可以让被控端提供启动窗口或剪贴板里的当前 `Host ID`，再精确寻址：
+
+```bash
+rcwctl connect --id <machine-id> --host-id <host-id> --totp <current-totp>
 ```
 
 给 agent 使用时建议开启 JSON 输出：

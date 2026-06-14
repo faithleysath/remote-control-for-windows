@@ -13,6 +13,7 @@ pub(crate) fn append_host_audit(
 ) {
     let mut audit = AuditEvent::new("host", event);
     audit.machine_id = Some(context.machine_id.clone());
+    audit.host_id = Some(context.host_id.clone());
     audit.request_id = request_id;
     audit.session_id = session_id;
     audit.command = command;

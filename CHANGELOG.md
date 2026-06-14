@@ -4,6 +4,16 @@
 
 ## 未发布
 
+## 0.1.6 - 2026-06-14
+
+- 升级 wire protocol 到 v4，引入运行期 `host_id` 和 host `connection_id`，服务端按 `host_id` 路由在线 host、session、request 和后台 exec job。
+- 将展示用短 `machine_id` 扩展为 `XXXX-XXXX-XXXX`，并只作为人工输入短码和冲突检测索引使用，不再作为服务端内部唯一主键。
+- `rcwctl connect` 和 MCP `connect` 增加可选 `host_id`，短 `machine_id` 冲突时可以用被控端窗口或剪贴板里的当前 Host ID 精确寻址。
+- 被控端启动时生成进程运行期 Host ID，不写入磁盘；同一进程内断线重连复用该 Host ID，进程重启后重新生成，避免克隆机器复制持久 Host ID 后互相替换。
+- 被控端启动初期增加单实例锁，同一物理机同时只能运行一个 `rcw-host` 实例。
+- 保持一个 host 同时只有一个 active session，但同一 session 内允许多个命令按 `request_id` 并行执行，exec/download 的 WebSocket 写锁缩短到单次发送粒度。
+- 审计事件补充 `host_id` 字段，服务端在 host 重连、旧连接迟到回包和 session 清理路径上校验 `host_id`/`connection_id`，避免旧连接串包到新会话。
+
 ## 0.1.5 - 2026-06-14
 
 - 升级 wire protocol 到 v3，新增 `command.start` / `command.status`，让 CLI 和 MCP 的长时间 `exec` 都使用 server-owned 后台任务。

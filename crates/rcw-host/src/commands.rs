@@ -22,7 +22,10 @@ use tracing::error;
 
 use crate::{
     audit::append_host_audit,
-    output::{send_binary_chunks, send_complete, send_error, send_output, SharedWsSink, WsSink},
+    output::{
+        send_binary_chunks, send_complete, send_error, send_output, send_shared_complete,
+        send_shared_complete_kind, send_shared_error, send_shared_output, SharedWsSink, WsSink,
+    },
     platform, HostContext,
 };
 
@@ -264,31 +267,28 @@ async fn run_async_command_task(
         Some("started"),
     );
 
-    let result = {
-        let mut sink = sink.lock().await;
-        match payload.command.as_str() {
-            COMMAND_EXEC => {
-                command_exec(
-                    &mut sink,
-                    &request_id,
-                    session_id.clone(),
-                    payload.args,
-                    Some(cancel_rx),
-                )
-                .await
-            }
-            COMMAND_DOWNLOAD_BEGIN => {
-                command_download(
-                    &mut sink,
-                    &request_id,
-                    session_id.clone(),
-                    payload.args,
-                    Some(cancel_rx),
-                )
-                .await
-            }
-            _ => Err(anyhow!("unsupported async command")),
+    let result = match payload.command.as_str() {
+        COMMAND_EXEC => {
+            command_exec_shared(
+                &sink,
+                &request_id,
+                session_id.clone(),
+                payload.args,
+                Some(cancel_rx),
+            )
+            .await
         }
+        COMMAND_DOWNLOAD_BEGIN => {
+            command_download_shared(
+                &sink,
+                &request_id,
+                session_id.clone(),
+                payload.args,
+                Some(cancel_rx),
+            )
+            .await
+        }
+        _ => Err(anyhow!("unsupported async command")),
     };
 
     let ok = result.is_ok();
@@ -314,8 +314,8 @@ async fn run_async_command_task(
             started.elapsed().as_millis()
         );
         let code = error_code_for_command_error(err);
-        let _ = send_error(
-            &mut *sink.lock().await,
+        let _ = send_shared_error(
+            &sink,
             Some(request_id.clone()),
             session_id.clone(),
             code,
@@ -446,6 +446,101 @@ async fn command_exec(
     .await
 }
 
+async fn command_exec_shared(
+    sink: &SharedWsSink,
+    request_id: &str,
+    session_id: Option<String>,
+    args: serde_json::Value,
+    cancel_rx: Option<watch::Receiver<bool>>,
+) -> Result<()> {
+    let args: ExecArgs = serde_json::from_value(args)?;
+    let started = Instant::now();
+    let mut command = Command::new(&args.program);
+    command.args(&args.argv);
+    if let Some(cwd) = args.cwd.clone() {
+        command.current_dir(cwd);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let (output_tx, mut output_rx) =
+        tokio::sync::mpsc::channel::<(String, String)>(PROCESS_OUTPUT_QUEUE_CAPACITY);
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(read_process_stream("stdout", stdout, output_tx.clone()));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(read_process_stream("stderr", stderr, output_tx));
+    }
+
+    let wait = child.wait();
+    tokio::pin!(wait);
+    let mut deadline = args.timeout_ms.map(|timeout_ms| {
+        Box::pin(tokio::time::sleep(std::time::Duration::from_millis(
+            timeout_ms,
+        )))
+    });
+    let mut cancel_rx = cancel_rx;
+    let status = loop {
+        tokio::select! {
+            Some((stream, data)) = output_rx.recv() => {
+                send_shared_output(sink, request_id, session_id.clone(), &stream, &data).await?;
+            }
+            result = &mut wait => {
+                break result?;
+            }
+            _ = async {
+                match deadline.as_mut() {
+                    Some(deadline) => deadline.as_mut().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(pid) = pid {
+                    let _ = platform::kill_process_tree(pid);
+                }
+                return Err(anyhow!("command timed out"));
+            }
+            changed = async {
+                match cancel_rx.as_mut() {
+                    Some(cancel_rx) => cancel_rx.changed().await,
+                    None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
+                }
+            } => {
+                let cancelled = changed.is_ok()
+                    && cancel_rx
+                        .as_ref()
+                        .map(|cancel_rx| *cancel_rx.borrow())
+                        .unwrap_or(false);
+                if cancelled {
+                    if let Some(pid) = pid {
+                        let _ = platform::kill_process_tree(pid);
+                    }
+                    return Err(anyhow!("command cancelled"));
+                }
+            }
+        }
+    };
+
+    while let Ok((stream, data)) = output_rx.try_recv() {
+        send_shared_output(sink, request_id, session_id.clone(), &stream, &data).await?;
+    }
+
+    send_shared_complete(
+        sink,
+        request_id,
+        session_id,
+        CommandCompletePayload {
+            ok: status.success(),
+            exit_code: status.code(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            size: None,
+            sha256: None,
+            summary: Some(format!("program={}", args.program)),
+        },
+    )
+    .await
+}
+
 async fn command_download(
     sink: &mut WsSink,
     request_id: &str,
@@ -482,6 +577,42 @@ async fn command_download(
     .await
 }
 
+async fn command_download_shared(
+    sink: &SharedWsSink,
+    request_id: &str,
+    session_id: Option<String>,
+    args: serde_json::Value,
+    cancel_rx: Option<watch::Receiver<bool>>,
+) -> Result<()> {
+    let args: DownloadArgs = serde_json::from_value(args)?;
+    let path = PathBuf::from(&args.remote_path);
+    let size = fs::metadata(&path)?.len();
+    let sha256 = send_file_binary_chunks_shared_cancellable(
+        sink,
+        request_id,
+        BinaryKind::DownloadChunk,
+        &path,
+        size,
+        cancel_rx,
+    )
+    .await?;
+    send_shared_complete_kind(
+        sink,
+        rcw_common::protocol::TYPE_DOWNLOAD_COMPLETE,
+        request_id,
+        session_id,
+        CommandCompletePayload {
+            ok: true,
+            exit_code: Some(0),
+            duration_ms: 0,
+            size: Some(size),
+            sha256: Some(sha256),
+            summary: Some(format!("read {}", args.remote_path)),
+        },
+    )
+    .await
+}
+
 async fn send_file_binary_chunks_cancellable(
     sink: &mut WsSink,
     request_id: &str,
@@ -502,6 +633,51 @@ async fn send_file_binary_chunks_cancellable(
         }
         tokio::select! {
             result = sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)) => {
+                result?;
+            }
+            changed = async {
+                match cancel_rx.as_mut() {
+                    Some(cancel_rx) => cancel_rx.changed().await,
+                    None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
+                }
+            } => {
+                if changed.is_ok()
+                    && cancel_rx
+                        .as_ref()
+                        .map(|cancel_rx| *cancel_rx.borrow())
+                        .unwrap_or(false)
+                {
+                    return Err(anyhow!("command cancelled"));
+                }
+            }
+        }
+    }
+    Ok(reader.finalize_sha256())
+}
+
+async fn send_file_binary_chunks_shared_cancellable(
+    sink: &SharedWsSink,
+    request_id: &str,
+    kind: BinaryKind,
+    path: &std::path::Path,
+    size: u64,
+    mut cancel_rx: Option<watch::Receiver<bool>>,
+) -> Result<String> {
+    let mut reader =
+        rcw_common::transfer::FileBinaryFrameReader::new(path, size, request_id, kind)?;
+    while let Some(frame) = reader.next_frame()? {
+        if cancel_rx
+            .as_ref()
+            .map(|cancel_rx| *cancel_rx.borrow())
+            .unwrap_or(false)
+        {
+            return Err(anyhow!("command cancelled"));
+        }
+        tokio::select! {
+            result = async {
+                let mut sink = sink.lock().await;
+                sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)).await
+            } => {
                 result?;
             }
             changed = async {

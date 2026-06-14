@@ -101,7 +101,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 target/x86_64-pc-windows-msvc/release/rcw-host.exe
 ```
 
-使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的早期实机测试产物为 x86-64 Windows console PE，已在维护者本机的 Windows VM 中运行通过；涉及协议 v3 后台 exec 和取消语义的后续改动仍应按 [testing.md](testing.md) 刷新验证。
+使用 `crt-static` 可以避免干净 Windows 环境缺少 `VCRUNTIME140.dll` 等 VC++ 运行库。2026-06-11 的早期实机测试产物为 x86-64 Windows console PE，已在维护者本机的 Windows VM 中运行通过；涉及协议 v4 host identity/routing、后台 exec 和取消语义的后续改动仍应按 [testing.md](testing.md) 刷新验证。
 
 如果在其他机器上无法使用 `cargo-xwin`，可以改在 Windows builder 上执行同等 release 构建，并记录构建命令和 SHA-256。
 
@@ -158,9 +158,11 @@ curl https://remote.example.com/healthz
 - 控制端 Windows：`%APPDATA%\rcwctl\audit.jsonl`
 - 服务端：`./rcw-server-audit.jsonl` 或 `RCW_AUDIT_LOG`
 
-日志格式为 JSON Lines。每行是一条独立事件，包含 `time`、`side`、`machine_id`、`session_id`、`request_id`、`event`、`result` 等字段。
+日志格式为 JSON Lines。每行是一条独立事件，包含 `time`、`side`、`host_id`、`machine_id`、`session_id`、`request_id`、`event`、`result` 等字段。
 
 被控端控制台必须同步显示审计摘要，不依赖日志文件打开成功。即使本地日志写入失败，也要继续把远控操作实时显示在控制台。
+
+被控端 `Host ID` 是进程运行期随机值，不写入磁盘。启动窗口和剪贴板连接信息会显示当前 `Host ID`；进程重启后该值会变化。
 
 ## 权限状态显示
 

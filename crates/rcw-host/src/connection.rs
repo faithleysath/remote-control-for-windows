@@ -46,6 +46,7 @@ pub(crate) async fn run_host_connection(
         HostHelloPayload {
             protocol_version: PROTOCOL_VERSION,
             host_version: env!("CARGO_PKG_VERSION").to_owned(),
+            host_id: context.host_id.clone(),
             machine_id: context.machine_id.clone(),
             totp_period_seconds: context.totp_period_seconds,
             os: std::env::consts::OS.to_owned(),

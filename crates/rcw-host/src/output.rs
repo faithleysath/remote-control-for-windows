@@ -21,6 +21,49 @@ pub(crate) fn shared_sink(sink: WsSink) -> SharedWsSink {
     Arc::new(Mutex::new(sink))
 }
 
+pub(crate) async fn send_shared_output(
+    sink: &SharedWsSink,
+    request_id: &str,
+    session_id: Option<String>,
+    stream: &str,
+    data: &str,
+) -> Result<()> {
+    let mut sink = sink.lock().await;
+    send_output(&mut sink, request_id, session_id, stream, data).await
+}
+
+pub(crate) async fn send_shared_complete(
+    sink: &SharedWsSink,
+    request_id: &str,
+    session_id: Option<String>,
+    payload: CommandCompletePayload,
+) -> Result<()> {
+    let mut sink = sink.lock().await;
+    send_complete(&mut sink, request_id, session_id, payload).await
+}
+
+pub(crate) async fn send_shared_complete_kind(
+    sink: &SharedWsSink,
+    kind: &str,
+    request_id: &str,
+    session_id: Option<String>,
+    payload: CommandCompletePayload,
+) -> Result<()> {
+    let mut sink = sink.lock().await;
+    send_complete_kind(&mut sink, kind, request_id, session_id, payload).await
+}
+
+pub(crate) async fn send_shared_error(
+    sink: &SharedWsSink,
+    request_id: Option<String>,
+    session_id: Option<String>,
+    code: ErrorCode,
+    message: &str,
+) -> Result<()> {
+    let mut sink = sink.lock().await;
+    send_error(&mut sink, request_id, session_id, code, message).await
+}
+
 pub(crate) async fn send_binary_chunks(
     sink: &mut WsSink,
     request_id: &str,

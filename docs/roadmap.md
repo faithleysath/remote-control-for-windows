@@ -19,12 +19,12 @@
 - Linux 到 Windows MSVC 的静态 CRT host 交叉构建。
 - Windows VM 中的主流程实机 E2E 覆盖。
 
-当前代码还已实现协议 v3 的 server-owned 后台 exec、CLI/MCP 的 `exec-status` / `exec-cancel`、MCP 文件传输后台任务和取消语义。这些能力需要按 [testing.md](testing.md) 刷新 Windows 实机验证后，才能归入已验证基线。
+当前代码还已实现协议 v4 的 host identity/routing、server-owned 后台 exec、CLI/MCP 的 `exec-status` / `exec-cancel`、MCP 文件传输后台任务和取消语义。这些能力需要按 [testing.md](testing.md) 刷新 Windows 实机验证后，才能归入已验证基线。
 
 ## 维护优先级
 
 - 闭合剩余的标准用户交互桌面验证缺口。
-- 刷新协议 v3 后台 exec、exec 取消和 MCP 文件传输取消的 Windows 实机 E2E 证据。
+- 刷新协议 v4 host identity/routing、后台 exec、exec 取消和 MCP 文件传输取消的 Windows 实机 E2E 证据。
 - 围绕现有手工 E2E 清单增加可重复的 Windows VM smoke 自动化。
 - 改进发布打包和校验和生成。
 - 增加 Linux workspace 检查的 CI 覆盖。

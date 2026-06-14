@@ -22,7 +22,7 @@ use crate::{
     defaults::{DEFAULT_EXEC_TIMEOUT_MS, DEFAULT_EXEC_WAIT_MS, EXEC_STATUS_POLL_INTERVAL},
     output::{print_json, write_output_file},
     session::{FileSessionStore, SessionFile, SessionStore},
-    transport::ControlClient,
+    transport::{ControlClient, OpenSessionRequest},
 };
 
 pub(crate) type RemoteStartHook = Box<dyn FnOnce() + Send + 'static>;
@@ -58,6 +58,7 @@ pub(crate) struct OpenSessionResult {
     pub(crate) ok: bool,
     pub(crate) session_id: String,
     pub(crate) machine_id: String,
+    pub(crate) host_id: String,
     pub(crate) server: String,
     pub(crate) request_id: String,
 }
@@ -145,23 +146,11 @@ pub(crate) struct SimpleResult {
 pub(crate) async fn open_session(
     cli: &Cli,
     store: &dyn SessionStore,
-    request_id: &str,
-    machine_id: &str,
-    totp: &str,
-    explicit_period: Option<u64>,
-    force_reconnect: bool,
+    request: OpenSessionRequest<'_>,
 ) -> Result<i32> {
     let config = ControllerConfig::from_cli(cli);
-    let result = open_session_state(
-        &config,
-        store,
-        request_id,
-        machine_id,
-        totp,
-        explicit_period,
-        force_reconnect,
-    )
-    .await?;
+    let request_id = request.request_id.to_owned();
+    let result = open_session_state(&config, store, request).await?;
 
     if cli.json {
         print_json(serde_json::to_value(&result)?)?;
@@ -170,7 +159,8 @@ pub(crate) async fn open_session(
             "opened session {} for {} ({})",
             result.session_id, result.machine_id, result.server
         );
-        println!("request_id: {request_id}");
+        println!("host_id: {}", result.host_id);
+        println!("request_id: {}", request_id);
     }
     Ok(0)
 }
@@ -178,21 +168,11 @@ pub(crate) async fn open_session(
 pub(crate) async fn open_session_state(
     config: &ControllerConfig,
     store: &dyn SessionStore,
-    request_id: &str,
-    machine_id: &str,
-    totp: &str,
-    explicit_period: Option<u64>,
-    force_reconnect: bool,
+    request: OpenSessionRequest<'_>,
 ) -> Result<OpenSessionResult> {
+    let request_id = request.request_id.to_owned();
     let opened = ControlClient::new(config, store)
-        .open_session(
-            request_id,
-            machine_id,
-            totp,
-            explicit_period,
-            force_reconnect,
-            config_wait_timeout(config)?,
-        )
+        .open_session(request, config_wait_timeout(config)?)
         .await?;
     let server = opened.server.clone();
     let session_id = opened.session_id.clone();
@@ -213,8 +193,9 @@ pub(crate) async fn open_session_state(
         ok: true,
         session_id,
         machine_id: opened_machine_id,
+        host_id: opened.host_id,
         server,
-        request_id: request_id.to_owned(),
+        request_id,
     })
 }
 

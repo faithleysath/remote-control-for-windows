@@ -44,6 +44,11 @@ pub(crate) enum Commands {
     Open {
         #[arg(long = "id", help = "Target machine ID displayed by rcw-host.")]
         id: String,
+        #[arg(
+            long,
+            help = "Optional runtime Host ID displayed by rcw-host; use to disambiguate short ID collisions."
+        )]
+        host_id: Option<String>,
         #[arg(long, help = "Current TOTP code displayed by rcw-host.")]
         totp: String,
         #[arg(
@@ -252,6 +257,28 @@ mod tests {
                 assert_eq!(command, vec!["cmd.exe"]);
             }
             _ => panic!("expected exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_connect_host_id() {
+        let cli = Cli::try_parse_from([
+            "rcwctl",
+            "connect",
+            "--id",
+            "8A4F-2B7C-91D0",
+            "--host-id",
+            "host_abc",
+            "--totp",
+            "123456",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Open { id, host_id, .. } => {
+                assert_eq!(id, "8A4F-2B7C-91D0");
+                assert_eq!(host_id.as_deref(), Some("host_abc"));
+            }
+            _ => panic!("expected connect command"),
         }
     }
 }

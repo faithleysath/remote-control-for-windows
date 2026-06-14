@@ -1,6 +1,7 @@
 mod audit;
 mod commands;
 mod connection;
+mod identity;
 mod output;
 mod platform;
 mod upload;
@@ -9,11 +10,17 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
-use rcw_common::{config, ids::short_machine_id, totp};
+use rcw_common::{
+    config,
+    ids::{new_host_id, short_machine_id},
+    totp,
+};
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::{audit::append_host_audit, connection::run_host_connection};
+use crate::{
+    audit::append_host_audit, connection::run_host_connection, identity::SingleInstanceGuard,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -29,6 +36,7 @@ struct Args {
 #[derive(Clone)]
 pub(crate) struct HostContext {
     pub(crate) server_url: String,
+    pub(crate) host_id: String,
     pub(crate) machine_id: String,
     pub(crate) totp_seed: Arc<Vec<u8>>,
     pub(crate) totp_period_seconds: u64,
@@ -39,23 +47,28 @@ pub(crate) struct HostContext {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().compact().init();
     let args = Args::parse();
+
+    let _single_instance = SingleInstanceGuard::acquire()?;
     let server_url = config::resolve_server_url(args.server.as_deref())?;
     let ws_url = config::ws_endpoint_url(&server_url, "/ws/host")?;
     let period = config::resolve_totp_period_seconds(args.totp_period_seconds)?;
     let audit_path = args.audit_log.unwrap_or_else(platform::default_audit_path);
     let material = platform::stable_machine_material()?;
     let machine_id = short_machine_id(&material);
+    let host_id = new_host_id();
     let seed = Arc::new(totp::random_seed());
     let power = platform::PowerGuard::acquire();
 
     print_startup(
         &server_url,
+        &host_id,
         &machine_id,
         period,
         power.as_ref().map(|guard| guard.active()),
     );
     let context = Arc::new(HostContext {
         server_url: server_url.clone(),
+        host_id,
         machine_id: machine_id.clone(),
         totp_seed: seed,
         totp_period_seconds: period,
@@ -131,19 +144,21 @@ fn update_clipboard(context: &HostContext) {
     )
     .unwrap_or_else(|_| "000000".to_owned());
     let text = format!(
-        "远程协助连接信息\n服务器：{}\n机器 ID：{}\n验证码：{}\n验证码有效期：{} 秒\n",
-        context.server_url, context.machine_id, code, context.totp_period_seconds
+        "远程协助连接信息\n服务器：{}\n机器 ID：{}\nHost ID：{}\n验证码：{}\n验证码有效期：{} 秒\n",
+        context.server_url, context.machine_id, context.host_id, code, context.totp_period_seconds
     );
     match platform::copy_connection_info(&text) {
         Ok(()) => println!("Clipboard: connection info copied"),
         Err(err) => println!("Clipboard: copy failed ({err}); copy ID/TOTP manually"),
     }
     println!("Machine ID: {}", context.machine_id);
+    println!("Host ID: {}", context.host_id);
     println!("Current TOTP: {code}");
 }
 
 fn print_startup(
     server_url: &str,
+    host_id: &str,
     machine_id: &str,
     period: u64,
     power_active: Result<bool, &anyhow::Error>,
@@ -157,6 +172,7 @@ fn print_startup(
         println!("Privilege: standard user");
     }
     println!("Machine ID: {machine_id}");
+    println!("Host ID: {host_id}");
     println!("TOTP period: {period}s");
     match power_active {
         Ok(true) => println!("Power: sleep/display timeout suppressed while host is running"),

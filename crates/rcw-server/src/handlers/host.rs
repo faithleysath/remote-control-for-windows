@@ -8,7 +8,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use rcw_common::{
     audit::AuditEvent,
-    ids::{new_session_id, new_session_token},
+    ids::{new_request_id, new_session_id, new_session_token},
     protocol::{
         CommandCompletePayload, CommandOutputPayload, ControlOpenResultPayload, ErrorCode,
         ErrorPayload, HostAuthResultPayload, HostHelloAckPayload, HostHelloPayload,
@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     audit,
+    state::HostConn,
     ws::{
         log_websocket_read_error, make_error, outbound_channel, send_binary, send_error, send_text,
         spawn_writer, HEARTBEAT_INTERVAL_MS,
@@ -90,7 +91,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         return;
     }
 
-    if !state.inner.allow_host_registration(&hello.machine_id).await {
+    if !state.inner.allow_host_registration(&hello.host_id).await {
         let error = make_error(
             hello_msg.request_id.clone(),
             None,
@@ -107,23 +108,30 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
 
     let (tx, rx) = outbound_channel();
     let writer = spawn_writer(sender, rx, "host");
+    let connection_id = new_request_id();
 
-    state
+    let replaced = state
         .inner
         .register_host(
+            hello.host_id.clone(),
             hello.machine_id.clone(),
+            connection_id.clone(),
             tx.clone(),
             hello.totp_period_seconds,
         )
         .await;
+    if let Some(replaced) = replaced {
+        close_replaced_host_connection(&state, replaced).await;
+    }
 
     audit(
         &state,
         AuditEvent {
             machine_id: Some(hello.machine_id.clone()),
+            host_id: Some(hello.host_id.clone()),
             summary: Some(format!(
-                "host connected version={} os={}",
-                hello.host_version, hello.os
+                "host connected host_id={} connection_id={} version={} os={}",
+                hello.host_id, connection_id, hello.host_version, hello.os
             )),
             ..AuditEvent::new("server", "host.connected")
         },
@@ -141,16 +149,21 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
     .expect("host hello ack serializes");
     send_text(&tx, ack);
 
-    info!("host {} connected", hello.machine_id);
+    info!(
+        "host {} ({}) connected connection={}",
+        hello.machine_id, hello.host_id, connection_id
+    );
 
     while let Some(frame) = receiver.next().await {
         match frame {
             Ok(Message::Text(text)) => match serde_json::from_str::<WireMessage>(&text) {
-                Ok(message) => handle_host_message(&state, &hello.machine_id, message).await,
+                Ok(message) => {
+                    handle_host_message(&state, &hello.host_id, &connection_id, message).await
+                }
                 Err(err) => warn!("invalid host message from {}: {err}", hello.machine_id),
             },
             Ok(Message::Binary(bytes)) => {
-                relay_host_binary_response(&state, &hello.machine_id, bytes).await;
+                relay_host_binary_response(&state, &hello.host_id, &connection_id, bytes).await;
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
@@ -162,22 +175,84 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
     }
 
     writer.abort();
-    unregister_host(&state, &hello.machine_id).await;
+    unregister_host(&state, &hello.host_id, &connection_id, &hello.machine_id).await;
 }
 
-async fn handle_host_message(state: &AppState, machine_id: &str, message: WireMessage) {
+async fn close_replaced_host_connection(state: &AppState, replaced: HostConn) {
+    for (request_id, pending) in state
+        .inner
+        .remove_pending_open_for_host(&replaced.host_id, Some(&replaced.connection_id))
+        .await
+    {
+        send_error(
+            &pending.controller_tx,
+            Some(request_id),
+            None,
+            ErrorCode::HostDisconnected,
+            "host connection replaced before authentication completed",
+        );
+    }
+
+    let removed_sessions = state
+        .inner
+        .remove_sessions_for_host(
+            &replaced.host_id,
+            Some(&replaced.connection_id),
+            rcw_common::protocol::ErrorPayload {
+                code: ErrorCode::HostDisconnected,
+                message: "host connection replaced".to_owned(),
+            },
+        )
+        .await;
+    for session in removed_sessions {
+        if let Some(tx) = session.controller_tx {
+            send_error(
+                &tx,
+                None,
+                Some(session.session_id.clone()),
+                ErrorCode::HostDisconnected,
+                "host connection replaced",
+            );
+        }
+        audit(
+            state,
+            AuditEvent {
+                machine_id: Some(session.machine_id),
+                host_id: Some(replaced.host_id.clone()),
+                session_id: Some(session.session_id),
+                result: Some("closed".to_owned()),
+                summary: Some("host connection replaced".to_owned()),
+                ..AuditEvent::new("server", "session.closed")
+            },
+        );
+    }
+}
+
+async fn handle_host_message(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
     match message.kind.as_str() {
-        TYPE_HOST_AUTH_RESULT => handle_host_auth_result(state, machine_id, message).await,
+        TYPE_HOST_AUTH_RESULT => {
+            handle_host_auth_result(state, host_id, connection_id, message).await
+        }
         TYPE_COMMAND_OUTPUT
         | TYPE_COMMAND_COMPLETE
         | TYPE_UPLOAD_COMPLETE
         | TYPE_DOWNLOAD_COMPLETE
-        | TYPE_ERROR => relay_host_response(state, machine_id, message).await,
-        other => debug!("ignored host message type {other} from {machine_id}"),
+        | TYPE_ERROR => relay_host_response(state, host_id, connection_id, message).await,
+        other => debug!("ignored host message type {other} from {host_id}"),
     }
 }
 
-async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: WireMessage) {
+async fn handle_host_auth_result(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
     let Some(request_id) = message.request_id.clone() else {
         return;
     };
@@ -195,7 +270,7 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
         return;
     };
 
-    if pending.machine_id != machine_id {
+    if pending.host_id != host_id || pending.connection_id != connection_id {
         warn!("host auth result machine mismatch for request {request_id}");
         send_error(
             &pending.controller_tx,
@@ -219,7 +294,8 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
         audit(
             state,
             AuditEvent {
-                machine_id: Some(machine_id.to_owned()),
+                machine_id: Some(pending.machine_id),
+                host_id: Some(host_id.to_owned()),
                 request_id: Some(request_id),
                 result: Some("failed".to_owned()),
                 summary: Some(code.message().to_owned()),
@@ -230,7 +306,8 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
     }
 
     if pending.force_reconnect {
-        close_existing_sessions_for_force_reconnect(state, machine_id, &request_id).await;
+        close_existing_sessions_for_force_reconnect(state, host_id, connection_id, &request_id)
+            .await;
     }
 
     let session_id = new_session_id();
@@ -240,7 +317,9 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
         .create_session(
             session_id.clone(),
             session_token.clone(),
-            machine_id.to_owned(),
+            host_id.to_owned(),
+            pending.machine_id.clone(),
+            connection_id.to_owned(),
             pending.controller_tx.clone(),
         )
         .await;
@@ -253,20 +332,21 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
             ok: true,
             session_id: session_id.clone(),
             session_token,
-            machine_id: machine_id.to_owned(),
+            host_id: host_id.to_owned(),
+            machine_id: pending.machine_id.clone(),
         },
     )
     .expect("open result serializes");
     send_text(&pending.controller_tx, result);
 
-    if let Some(host_tx) = state.inner.host_tx(machine_id).await {
+    if let Some(host_tx) = state.inner.host_tx(host_id, connection_id).await {
         let opened = WireMessage::new(
             TYPE_HOST_SESSION_OPENED,
             Some(request_id.clone()),
             Some(session_id.clone()),
             HostSessionOpenedPayload {
                 session_id: session_id.clone(),
-                controller_label: pending.controller_label,
+                controller_label: pending.controller_label.clone(),
             },
         )
         .expect("session opened serializes");
@@ -276,7 +356,8 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
     audit(
         state,
         AuditEvent {
-            machine_id: Some(machine_id.to_owned()),
+            machine_id: Some(pending.machine_id),
+            host_id: Some(host_id.to_owned()),
             session_id: Some(session_id),
             request_id: Some(request_id),
             result: Some("ok".to_owned()),
@@ -287,13 +368,15 @@ async fn handle_host_auth_result(state: &AppState, machine_id: &str, message: Wi
 
 async fn close_existing_sessions_for_force_reconnect(
     state: &AppState,
-    machine_id: &str,
+    host_id: &str,
+    connection_id: &str,
     request_id: &str,
 ) {
     let removed_sessions = state
         .inner
-        .remove_sessions_for_machine(
-            machine_id,
+        .remove_sessions_for_host(
+            host_id,
+            Some(connection_id),
             rcw_common::protocol::ErrorPayload {
                 code: ErrorCode::Cancelled,
                 message: "session replaced by force reconnect".to_owned(),
@@ -304,7 +387,7 @@ async fn close_existing_sessions_for_force_reconnect(
         return;
     }
 
-    let host_tx = state.inner.host_tx(machine_id).await;
+    let host_tx = state.inner.host_tx(host_id, connection_id).await;
     for session in removed_sessions {
         if let Some(tx) = &session.controller_tx {
             send_error(
@@ -331,7 +414,8 @@ async fn close_existing_sessions_for_force_reconnect(
         audit(
             state,
             AuditEvent {
-                machine_id: Some(machine_id.to_owned()),
+                machine_id: Some(session.machine_id),
+                host_id: Some(host_id.to_owned()),
                 session_id: Some(session.session_id),
                 request_id: Some(request_id.to_owned()),
                 result: Some("closed".to_owned()),
@@ -342,41 +426,52 @@ async fn close_existing_sessions_for_force_reconnect(
     }
 }
 
-async fn relay_host_response(state: &AppState, machine_id: &str, message: WireMessage) {
+async fn relay_host_response(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
     let request_id = message.request_id.clone();
     let is_terminal = matches!(
         message.kind.as_str(),
         TYPE_COMMAND_COMPLETE | TYPE_UPLOAD_COMPLETE | TYPE_DOWNLOAD_COMPLETE | TYPE_ERROR
     );
     let Some(session_id) = message.session_id.clone() else {
-        warn!("host response without session_id from {machine_id}");
+        warn!("host response without session_id from {host_id}");
         return;
     };
-    let is_detached = match request_id.as_deref() {
-        Some(request_id) => state.inner.request_route_is_detached(request_id).await,
-        None => false,
+
+    let route = if let Some(request_id) = &request_id {
+        state
+            .inner
+            .request_route_for_host(request_id, host_id, connection_id, Some(&session_id))
+            .await
+    } else {
+        None
     };
+    let is_detached = route.as_ref().map(|route| route.detached).unwrap_or(false);
     if is_detached {
         if let Some(request_id) = &request_id {
             record_detached_exec_response(state, request_id, &message).await;
         }
     }
-    let mut controller_tx = if let Some(request_id) = &request_id {
-        state.inner.controller_for_request(request_id).await
-    } else {
-        None
-    };
+    let mut controller_tx = route
+        .as_ref()
+        .filter(|route| !route.detached)
+        .map(|route| route.controller_tx.clone());
     if controller_tx.is_none() && !is_detached {
         controller_tx = state
             .inner
-            .session_controller_for_machine(&session_id, machine_id)
+            .session_controller_for_machine(&session_id, host_id, connection_id)
             .await;
     }
     debug!(
         kind = %message.kind,
         request_id = ?request_id,
         session_id = %session_id,
-        machine_id = %machine_id,
+        host_id = %host_id,
+        connection_id = %connection_id,
         has_controller = controller_tx.is_some(),
         terminal = is_terminal,
         "relaying host text response"
@@ -415,33 +510,42 @@ async fn record_detached_exec_response(state: &AppState, request_id: &str, messa
     }
 }
 
-async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: Vec<u8>) {
+async fn relay_host_binary_response(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    bytes: Vec<u8>,
+) {
     let frame = match BinaryFrame::decode(&bytes) {
         Ok(frame) => frame,
         Err(err) => {
-            warn!("invalid binary frame from host {machine_id}: {err}");
+            warn!("invalid binary frame from host {host_id}: {err}");
             return;
         }
     };
-    let session_id = state.inner.request_session_id(&frame.request_id).await;
-    let Some(session_id) = session_id else {
+    let route = state
+        .inner
+        .request_route_for_host(&frame.request_id, host_id, connection_id, None)
+        .await;
+    let Some(route) = route else {
         warn!(
-            "host binary frame for unknown request {} from {}",
-            frame.request_id, machine_id
+            "host binary frame for unknown or mismatched request {} from {}",
+            frame.request_id, host_id
         );
         return;
     };
-    let mut controller_tx = state.inner.controller_for_request(&frame.request_id).await;
+    let mut controller_tx = (!route.detached).then(|| route.controller_tx.clone());
     if controller_tx.is_none() {
         controller_tx = state
             .inner
-            .session_controller_for_machine(&session_id, machine_id)
+            .session_controller_for_machine(&route.session_id, host_id, connection_id)
             .await;
     }
     debug!(
         request_id = %frame.request_id,
-        session_id = %session_id,
-        machine_id = %machine_id,
+        session_id = %route.session_id,
+        host_id = %host_id,
+        connection_id = %connection_id,
         bytes = bytes.len(),
         has_controller = controller_tx.is_some(),
         "relaying host binary response"
@@ -451,8 +555,8 @@ async fn relay_host_binary_response(state: &AppState, machine_id: &str, bytes: V
     };
 }
 
-async fn unregister_host(state: &AppState, machine_id: &str) {
-    let removed_sessions = state.inner.unregister_host(machine_id).await;
+async fn unregister_host(state: &AppState, host_id: &str, connection_id: &str, machine_id: &str) {
+    let removed_sessions = state.inner.unregister_host(host_id, connection_id).await;
 
     for session in removed_sessions {
         if let Some(tx) = session.controller_tx {
@@ -467,7 +571,8 @@ async fn unregister_host(state: &AppState, machine_id: &str) {
         audit(
             state,
             AuditEvent {
-                machine_id: Some(machine_id.to_owned()),
+                machine_id: Some(session.machine_id),
+                host_id: Some(host_id.to_owned()),
                 session_id: Some(session.session_id),
                 result: Some("closed".to_owned()),
                 summary: Some("host disconnected".to_owned()),
@@ -480,7 +585,9 @@ async fn unregister_host(state: &AppState, machine_id: &str) {
         state,
         AuditEvent {
             machine_id: Some(machine_id.to_owned()),
+            host_id: Some(host_id.to_owned()),
             result: Some("ok".to_owned()),
+            summary: Some(format!("host_id={host_id} connection_id={connection_id}")),
             ..AuditEvent::new("server", "host.disconnected")
         },
     );

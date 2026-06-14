@@ -43,7 +43,7 @@ use crate::{
     defaults::EXEC_STATUS_POLL_INTERVAL,
     output::write_output_file_checked,
     session::{MemorySessionStore, SessionFile, SessionStore},
-    transport::ControlClient,
+    transport::{ControlClient, OpenSessionRequest},
 };
 
 #[derive(Debug, Clone)]
@@ -80,11 +80,14 @@ impl RcwMcpServer {
         let result = open_session_state(
             &self.config,
             &self.store(),
-            &request_id,
-            &params.machine_id,
-            &params.totp,
-            params.totp_period_seconds,
-            params.force_reconnect,
+            OpenSessionRequest {
+                request_id: &request_id,
+                machine_id: &params.machine_id,
+                host_id: params.host_id.as_deref(),
+                totp: &params.totp,
+                explicit_period: params.totp_period_seconds,
+                force_reconnect: params.force_reconnect,
+            },
         )
         .await;
         self.audit(&request_id, "mcp.connect", &result, started.elapsed(), None);

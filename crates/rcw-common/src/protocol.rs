@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::RcwResult;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 pub const TYPE_HOST_HELLO: &str = "host.hello";
 pub const TYPE_HOST_HELLO_ACK: &str = "host.hello_ack";
@@ -100,6 +100,7 @@ impl WireMessage {
 pub struct HostHelloPayload {
     pub protocol_version: u16,
     pub host_version: String,
+    pub host_id: String,
     pub machine_id: String,
     pub totp_period_seconds: u64,
     pub os: String,
@@ -117,6 +118,8 @@ pub struct ControlOpenPayload {
     pub protocol_version: u16,
     pub control_token: String,
     pub machine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     pub totp: String,
     pub totp_period_seconds: u64,
     #[serde(default)]
@@ -155,6 +158,7 @@ pub struct ControlOpenResultPayload {
     pub ok: bool,
     pub session_id: String,
     pub session_token: String,
+    pub host_id: String,
     pub machine_id: String,
 }
 
@@ -420,8 +424,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_marks_server_exec_jobs() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+    fn protocol_version_marks_host_identity_routing() {
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]

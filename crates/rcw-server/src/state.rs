@@ -19,6 +19,7 @@ pub(crate) const RATE_LIMIT_KEY_TTL: Duration = Duration::from_secs(5 * 60);
 
 pub(crate) struct ServerState {
     hosts: Mutex<HashMap<String, HostConn>>,
+    machine_index: Mutex<HashMap<String, HashSet<String>>>,
     sessions: Mutex<HashMap<String, SessionState>>,
     pending_open: Mutex<HashMap<String, PendingOpen>>,
     request_routes: Mutex<HashMap<String, RequestRoute>>,
@@ -29,6 +30,9 @@ pub(crate) struct ServerState {
 
 #[derive(Clone)]
 pub(crate) struct HostConn {
+    pub(crate) host_id: String,
+    pub(crate) machine_id: String,
+    pub(crate) connection_id: String,
     pub(crate) tx: Tx,
     pub(crate) totp_period_seconds: u64,
 }
@@ -37,14 +41,18 @@ pub(crate) struct HostConn {
 pub(crate) struct SessionState {
     pub(crate) session_id: String,
     pub(crate) session_token: String,
+    pub(crate) host_id: String,
     pub(crate) machine_id: String,
+    pub(crate) connection_id: String,
     pub(crate) controller_tx: Option<Tx>,
     pub(crate) last_seen: Instant,
 }
 
 #[derive(Clone)]
 pub(crate) struct PendingOpen {
+    pub(crate) host_id: String,
     pub(crate) machine_id: String,
+    pub(crate) connection_id: String,
     pub(crate) controller_tx: Tx,
     pub(crate) controller_label: String,
     pub(crate) force_reconnect: bool,
@@ -54,6 +62,8 @@ pub(crate) struct PendingOpen {
 #[derive(Clone)]
 pub(crate) struct RequestRoute {
     pub(crate) session_id: String,
+    pub(crate) host_id: String,
+    pub(crate) connection_id: String,
     pub(crate) controller_tx: Tx,
     pub(crate) detached: bool,
     pub(crate) created_at: Instant,
@@ -61,17 +71,28 @@ pub(crate) struct RequestRoute {
 
 pub(crate) struct CommandJob {
     snapshot: CommandStatusResultPayload,
-    machine_id: String,
+    host_id: String,
+    connection_id: String,
     session_id: String,
     session_token: String,
     created_at: Instant,
     finished_at: Option<Instant>,
 }
 
+pub(crate) struct CreateExecJob {
+    pub(crate) task_id: String,
+    pub(crate) host_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) session_id: String,
+    pub(crate) session_token: String,
+    pub(crate) started_at: String,
+}
+
 impl ServerState {
     pub(crate) fn new() -> Self {
         Self {
             hosts: Mutex::new(HashMap::new()),
+            machine_index: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             pending_open: Mutex::new(HashMap::new()),
             request_routes: Mutex::new(HashMap::new()),
@@ -81,31 +102,82 @@ impl ServerState {
         }
     }
 
-    pub(crate) async fn register_host(&self, machine_id: String, tx: Tx, totp_period_seconds: u64) {
-        let mut hosts = self.hosts.lock().await;
-        hosts.insert(
-            machine_id,
-            HostConn {
-                tx,
-                totp_period_seconds,
-            },
-        );
+    pub(crate) async fn register_host(
+        &self,
+        host_id: String,
+        machine_id: String,
+        connection_id: String,
+        tx: Tx,
+        totp_period_seconds: u64,
+    ) -> Option<HostConn> {
+        let old_machine_id = {
+            let mut hosts = self.hosts.lock().await;
+            hosts
+                .insert(
+                    host_id.clone(),
+                    HostConn {
+                        host_id: host_id.clone(),
+                        machine_id: machine_id.clone(),
+                        connection_id,
+                        tx,
+                        totp_period_seconds,
+                    },
+                )
+                .map(|old| (old.machine_id.clone(), old))
+        };
+
+        let mut index = self.machine_index.lock().await;
+        let old_host = if let Some((old_machine_id, old_host)) = old_machine_id {
+            if old_machine_id != machine_id {
+                remove_host_from_machine_index(&mut index, &old_machine_id, &host_id);
+            }
+            Some(old_host)
+        } else {
+            None
+        };
+        index.entry(machine_id).or_default().insert(host_id);
+        old_host
     }
 
-    pub(crate) async fn host(&self, machine_id: &str) -> Option<HostConn> {
+    pub(crate) async fn host(&self, host_id: &str) -> Option<HostConn> {
         let hosts = self.hosts.lock().await;
-        hosts.get(machine_id).cloned()
+        hosts.get(host_id).cloned()
     }
 
-    pub(crate) async fn host_tx(&self, machine_id: &str) -> Option<Tx> {
-        self.host(machine_id).await.map(|host| host.tx)
+    pub(crate) async fn host_for_machine_id(&self, machine_id: &str) -> HostLookup {
+        let host_ids = {
+            let index = self.machine_index.lock().await;
+            index
+                .get(machine_id)
+                .map(|ids| ids.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        if host_ids.is_empty() {
+            return HostLookup::NotFound;
+        }
+
+        let hosts = self.hosts.lock().await;
+        let matches = host_ids
+            .iter()
+            .filter_map(|host_id| hosts.get(host_id).cloned())
+            .collect::<Vec<_>>();
+        match matches.len() {
+            0 => HostLookup::NotFound,
+            1 => HostLookup::Found(matches[0].clone()),
+            _ => HostLookup::Ambiguous(matches),
+        }
     }
 
-    pub(crate) async fn host_has_active_session(&self, machine_id: &str) -> bool {
+    pub(crate) async fn host_tx(&self, host_id: &str, connection_id: &str) -> Option<Tx> {
+        self.host(host_id)
+            .await
+            .filter(|host| host.connection_id == connection_id)
+            .map(|host| host.tx)
+    }
+
+    pub(crate) async fn host_has_active_session(&self, host_id: &str) -> bool {
         let sessions = self.sessions.lock().await;
-        sessions
-            .values()
-            .any(|session| session.machine_id == machine_id)
+        sessions.values().any(|session| session.host_id == host_id)
     }
 
     pub(crate) async fn insert_pending_open(&self, request_id: String, pending: PendingOpen) {
@@ -123,11 +195,39 @@ impl ServerState {
         pending_open.remove(request_id);
     }
 
+    pub(crate) async fn remove_pending_open_for_host(
+        &self,
+        host_id: &str,
+        connection_id: Option<&str>,
+    ) -> Vec<(String, PendingOpen)> {
+        let mut pending_open = self.pending_open.lock().await;
+        let request_ids = pending_open
+            .iter()
+            .filter(|(_, pending)| pending.host_id == host_id)
+            .filter(|(_, pending)| {
+                connection_id
+                    .map(|connection_id| pending.connection_id == connection_id)
+                    .unwrap_or(true)
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| {
+                pending_open
+                    .remove(&request_id)
+                    .map(|pending| (request_id, pending))
+            })
+            .collect()
+    }
+
     pub(crate) async fn create_session(
         &self,
         session_id: String,
         session_token: String,
+        host_id: String,
         machine_id: String,
+        connection_id: String,
         controller_tx: Tx,
     ) {
         let mut sessions = self.sessions.lock().await;
@@ -136,7 +236,9 @@ impl ServerState {
             SessionState {
                 session_id,
                 session_token,
+                host_id,
                 machine_id,
+                connection_id,
                 controller_tx: Some(controller_tx),
                 last_seen: Instant::now(),
             },
@@ -204,25 +306,30 @@ impl ServerState {
         }
     }
 
-    pub(crate) async fn track_request_route(&self, request_id: String, session_id: String, tx: Tx) {
-        self.track_request_route_with_mode(request_id, session_id, tx, false)
+    pub(crate) async fn track_request_route(
+        &self,
+        request_id: String,
+        session: &SessionState,
+        tx: Tx,
+    ) {
+        self.track_request_route_with_mode(request_id, session, tx, false)
             .await;
     }
 
     pub(crate) async fn track_detached_request_route(
         &self,
         request_id: String,
-        session_id: String,
+        session: &SessionState,
         tx: Tx,
     ) {
-        self.track_request_route_with_mode(request_id, session_id, tx, true)
+        self.track_request_route_with_mode(request_id, session, tx, true)
             .await;
     }
 
     async fn track_request_route_with_mode(
         &self,
         request_id: String,
-        session_id: String,
+        session: &SessionState,
         tx: Tx,
         detached: bool,
     ) {
@@ -230,7 +337,9 @@ impl ServerState {
         routes.insert(
             request_id,
             RequestRoute {
-                session_id,
+                session_id: session.session_id.clone(),
+                host_id: session.host_id.clone(),
+                connection_id: session.connection_id.clone(),
                 controller_tx: tx,
                 detached,
                 created_at: Instant::now(),
@@ -248,50 +357,54 @@ impl ServerState {
         routes.retain(|_, route| route.detached || !route.controller_tx.same_channel(tx));
     }
 
-    pub(crate) async fn request_session_id(&self, request_id: &str) -> Option<String> {
+    pub(crate) async fn request_route(&self, request_id: &str) -> Option<RequestRoute> {
         let routes = self.request_routes.lock().await;
-        routes.get(request_id).map(|route| route.session_id.clone())
+        routes.get(request_id).cloned()
     }
 
-    pub(crate) async fn controller_for_request(&self, request_id: &str) -> Option<Tx> {
+    pub(crate) async fn request_route_for_host(
+        &self,
+        request_id: &str,
+        host_id: &str,
+        connection_id: &str,
+        session_id: Option<&str>,
+    ) -> Option<RequestRoute> {
         let routes = self.request_routes.lock().await;
         routes
             .get(request_id)
-            .filter(|route| !route.detached)
-            .map(|route| route.controller_tx.clone())
+            .filter(|route| route.host_id == host_id)
+            .filter(|route| route.connection_id == connection_id)
+            .filter(|route| {
+                session_id
+                    .map(|session_id| route.session_id == session_id)
+                    .unwrap_or(true)
+            })
+            .cloned()
     }
 
-    pub(crate) async fn request_route_is_detached(&self, request_id: &str) -> bool {
-        {
-            let routes = self.request_routes.lock().await;
-            if routes
-                .get(request_id)
-                .map(|route| route.detached)
-                .unwrap_or(false)
-            {
-                return true;
-            }
-        }
-        let jobs = self.command_jobs.lock().await;
-        jobs.contains_key(request_id)
+    pub(crate) async fn request_session_id(&self, request_id: &str) -> Option<String> {
+        self.request_route(request_id)
+            .await
+            .map(|route| route.session_id)
     }
 
     pub(crate) async fn session_controller_for_machine(
         &self,
         session_id: &str,
-        machine_id: &str,
+        host_id: &str,
+        connection_id: &str,
     ) -> Option<Tx> {
         let sessions = self.sessions.lock().await;
         sessions
             .get(session_id)
-            .filter(|session| session.machine_id == machine_id)
+            .filter(|session| session.host_id == host_id)
+            .filter(|session| session.connection_id == connection_id)
             .and_then(|session| session.controller_tx.clone())
     }
 
-    pub(crate) async fn command_route(&self, session_id: &str) -> Option<(String, String)> {
+    pub(crate) async fn command_route(&self, session_id: &str) -> Option<SessionState> {
         let sessions = self.sessions.lock().await;
-        let session = sessions.get(session_id)?;
-        Some((session.machine_id.clone(), session.session_id.clone()))
+        sessions.get(session_id).cloned()
     }
 
     pub(crate) async fn touch_session(&self, session_id: &str) {
@@ -301,13 +414,31 @@ impl ServerState {
         }
     }
 
-    pub(crate) async fn unregister_host(&self, machine_id: &str) -> Vec<SessionState> {
-        let mut hosts = self.hosts.lock().await;
-        hosts.remove(machine_id);
-        drop(hosts);
+    pub(crate) async fn unregister_host(
+        &self,
+        host_id: &str,
+        connection_id: &str,
+    ) -> Vec<SessionState> {
+        let removed = {
+            let mut hosts = self.hosts.lock().await;
+            match hosts.get(host_id) {
+                Some(host) if host.connection_id == connection_id => hosts.remove(host_id),
+                _ => None,
+            }
+        };
 
-        self.remove_sessions_for_machine(
-            machine_id,
+        let Some(removed_host) = removed else {
+            return Vec::new();
+        };
+
+        {
+            let mut index = self.machine_index.lock().await;
+            remove_host_from_machine_index(&mut index, &removed_host.machine_id, host_id);
+        }
+
+        self.remove_sessions_for_host(
+            host_id,
+            Some(connection_id),
             ErrorPayload {
                 code: ErrorCode::HostDisconnected,
                 message: ErrorCode::HostDisconnected.message().to_owned(),
@@ -316,16 +447,22 @@ impl ServerState {
         .await
     }
 
-    pub(crate) async fn remove_sessions_for_machine(
+    pub(crate) async fn remove_sessions_for_host(
         &self,
-        machine_id: &str,
+        host_id: &str,
+        connection_id: Option<&str>,
         error: ErrorPayload,
     ) -> Vec<SessionState> {
         let removed_sessions = {
             let mut sessions = self.sessions.lock().await;
             let session_ids = sessions
                 .values()
-                .filter(|session| session.machine_id == machine_id)
+                .filter(|session| session.host_id == host_id)
+                .filter(|session| {
+                    connection_id
+                        .map(|connection_id| session.connection_id == connection_id)
+                        .unwrap_or(true)
+                })
                 .map(|session| session.session_id.clone())
                 .collect::<Vec<_>>();
             session_ids
@@ -346,10 +483,10 @@ impl ServerState {
         removed_sessions
     }
 
-    pub(crate) async fn allow_host_registration(&self, machine_id: &str) -> bool {
+    pub(crate) async fn allow_host_registration(&self, host_id: &str) -> bool {
         allow_rate_limit(
             &self.host_registrations,
-            machine_id,
+            host_id,
             20,
             Duration::from_secs(60),
         )
@@ -440,19 +577,12 @@ impl ServerState {
         removed_sessions
     }
 
-    pub(crate) async fn create_exec_job(
-        &self,
-        task_id: String,
-        machine_id: String,
-        session_id: String,
-        session_token: String,
-        started_at: String,
-    ) -> CommandStatusResultPayload {
+    pub(crate) async fn create_exec_job(&self, job: CreateExecJob) -> CommandStatusResultPayload {
         let snapshot = CommandStatusResultPayload {
-            task_id: task_id.clone(),
+            task_id: job.task_id.clone(),
             status: CommandTaskStatus::Running,
-            request_id: task_id.clone(),
-            started_at,
+            request_id: job.task_id.clone(),
+            started_at: job.started_at,
             finished_at: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -463,12 +593,13 @@ impl ServerState {
         };
         let mut jobs = self.command_jobs.lock().await;
         jobs.insert(
-            task_id,
+            job.task_id,
             CommandJob {
                 snapshot: snapshot.clone(),
-                machine_id,
-                session_id,
-                session_token,
+                host_id: job.host_id,
+                connection_id: job.connection_id,
+                session_id: job.session_id,
+                session_token: job.session_token,
                 created_at: Instant::now(),
                 finished_at: None,
             },
@@ -491,12 +622,18 @@ impl ServerState {
         &self,
         task_id: &str,
         session_token: &str,
-    ) -> Option<(String, String)> {
+    ) -> Option<(String, String, String)> {
         let jobs = self.command_jobs.lock().await;
         jobs.get(task_id)
             .filter(|job| job.session_token == session_token)
             .filter(|job| job.snapshot.status == CommandTaskStatus::Running)
-            .map(|job| (job.machine_id.clone(), job.session_id.clone()))
+            .map(|job| {
+                (
+                    job.host_id.clone(),
+                    job.connection_id.clone(),
+                    job.session_id.clone(),
+                )
+            })
     }
 
     pub(crate) async fn append_exec_job_output(&self, task_id: &str, stream: &str, data: &str) {
@@ -582,6 +719,26 @@ impl ServerState {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum HostLookup {
+    NotFound,
+    Found(HostConn),
+    Ambiguous(Vec<HostConn>),
+}
+
+fn remove_host_from_machine_index(
+    index: &mut HashMap<String, HashSet<String>>,
+    machine_id: &str,
+    host_id: &str,
+) {
+    if let Some(host_ids) = index.get_mut(machine_id) {
+        host_ids.remove(host_id);
+        if host_ids.is_empty() {
+            index.remove(machine_id);
+        }
+    }
+}
+
 async fn allow_rate_limit(
     table: &Mutex<HashMap<String, VecDeque<Instant>>>,
     key: &str,
@@ -644,4 +801,212 @@ fn append_limited_output(target: &mut String, truncated: &mut bool, chunk: &str)
         .unwrap_or(0);
     target.push_str(&chunk[..cutoff]);
     *truncated = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use rcw_common::protocol::ErrorPayload;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::ws::Outbound;
+
+    fn tx() -> Tx {
+        let (tx, _rx) = mpsc::channel::<Outbound>(1);
+        tx
+    }
+
+    #[tokio::test]
+    async fn stale_host_unregister_does_not_remove_current_connection() {
+        let state = ServerState::new();
+        state
+            .register_host(
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-old".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+        state
+            .register_host(
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-new".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+
+        let removed = state.unregister_host("host-1", "conn-old").await;
+
+        assert!(removed.is_empty());
+        let current = state.host("host-1").await.unwrap();
+        assert_eq!(current.connection_id, "conn-new");
+    }
+
+    #[tokio::test]
+    async fn remove_sessions_for_host_respects_connection_id() {
+        let state = ServerState::new();
+        state
+            .create_session(
+                "session-old".to_owned(),
+                "token-old".to_owned(),
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-old".to_owned(),
+                tx(),
+            )
+            .await;
+        state
+            .create_session(
+                "session-new".to_owned(),
+                "token-new".to_owned(),
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-new".to_owned(),
+                tx(),
+            )
+            .await;
+
+        let removed = state
+            .remove_sessions_for_host(
+                "host-1",
+                Some("conn-old"),
+                ErrorPayload {
+                    code: ErrorCode::HostDisconnected,
+                    message: "old connection removed".to_owned(),
+                },
+            )
+            .await;
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_id, "session-old");
+        assert!(state
+            .session_if_valid("session-old", "token-old")
+            .await
+            .is_none());
+        assert!(state
+            .session_if_valid("session-new", "token-new")
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn machine_lookup_reports_ambiguous_short_ids() {
+        let state = ServerState::new();
+        state
+            .register_host(
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-1".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+        state
+            .register_host(
+                "host-2".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-2".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+
+        match state.host_for_machine_id("ABCD-EFGH-IJKL").await {
+            HostLookup::Ambiguous(hosts) => assert_eq!(hosts.len(), 2),
+            _ => panic!("expected ambiguous host lookup"),
+        }
+    }
+
+    #[tokio::test]
+    async fn host_lookup_by_id_ignores_short_id_collisions() {
+        let state = ServerState::new();
+        state
+            .register_host(
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-1".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+        state
+            .register_host(
+                "host-2".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-2".to_owned(),
+                tx(),
+                120,
+            )
+            .await;
+
+        let host = state.host("host-2").await.unwrap();
+
+        assert_eq!(host.host_id, "host-2");
+        assert_eq!(host.machine_id, "ABCD-EFGH-IJKL");
+        assert_eq!(host.connection_id, "conn-2");
+    }
+
+    #[tokio::test]
+    async fn remove_pending_open_for_host_respects_connection_id() {
+        let state = ServerState::new();
+        state
+            .insert_pending_open(
+                "req-old".to_owned(),
+                PendingOpen {
+                    host_id: "host-1".to_owned(),
+                    machine_id: "ABCD-EFGH-IJKL".to_owned(),
+                    connection_id: "conn-old".to_owned(),
+                    controller_tx: tx(),
+                    controller_label: "token:old".to_owned(),
+                    force_reconnect: false,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+        state
+            .insert_pending_open(
+                "req-new".to_owned(),
+                PendingOpen {
+                    host_id: "host-1".to_owned(),
+                    machine_id: "ABCD-EFGH-IJKL".to_owned(),
+                    connection_id: "conn-new".to_owned(),
+                    controller_tx: tx(),
+                    controller_label: "token:new".to_owned(),
+                    force_reconnect: false,
+                    created_at: Instant::now(),
+                },
+            )
+            .await;
+
+        let removed = state
+            .remove_pending_open_for_host("host-1", Some("conn-old"))
+            .await;
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "req-old");
+        assert!(state.take_pending_open("req-old").await.is_none());
+        assert!(state.take_pending_open("req-new").await.is_some());
+    }
+
+    #[test]
+    fn append_limited_output_keeps_within_limit() {
+        let mut target = String::new();
+        let mut truncated = false;
+
+        append_limited_output(&mut target, &mut truncated, "hello");
+
+        assert_eq!(target, "hello");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn session_idle_ttl_is_nonzero() {
+        assert!(SESSION_IDLE_TTL > std::time::Duration::ZERO);
+        assert!(Instant::now().checked_add(SESSION_IDLE_TTL).is_some());
+    }
 }

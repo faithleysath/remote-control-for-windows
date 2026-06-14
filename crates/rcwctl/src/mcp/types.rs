@@ -11,6 +11,9 @@ use crate::defaults::{
 pub(super) struct ConnectParams {
     #[schemars(description = "Target machine ID displayed by rcw-host.")]
     pub(super) machine_id: String,
+    #[serde(default)]
+    #[schemars(description = "Optional runtime Host ID displayed by rcw-host.")]
+    pub(super) host_id: Option<String>,
     #[schemars(description = "Current TOTP code from the target host.")]
     pub(super) totp: String,
     #[serde(default)]

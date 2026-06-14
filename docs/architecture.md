@@ -66,6 +66,7 @@ remote-control-for-windows/
 - Windows 控制台入口。
 - 连接服务器并维持心跳。
 - 生成和显示机器 ID/TOTP。
+- 首次运行生成并持久化 host ID；运行时只允许同一物理机一个 `rcw-host.exe` 实例。
 - 启动和 TOTP 刷新时把连接信息写入 Windows 剪贴板。
 - 运行期间阻止系统休眠和显示器熄屏，退出时释放电源请求。
 - 本地校验 TOTP。
@@ -104,21 +105,22 @@ remote-control-for-windows/
 
 ### 主机上线
 
-1. 被控端解析服务器地址。
-2. 被控端生成机器 ID 和本次运行的 TOTP seed。
-3. 被控端连接 `/ws/host`。
-4. 被控端发送不含 token 的 `host.hello`。
-5. 服务端登记在线主机。
-6. 被控端复制连接信息到剪贴板。
-7. 被控端设置运行期间阻止系统休眠和显示器熄屏。
-8. 被控端进入等待控制状态。
+1. 被控端在启动初期获取单实例锁；如果同一物理机已有 `rcw-host.exe` 运行，直接失败并提示。
+2. 被控端解析服务器地址。
+3. 被控端生成本次进程运行期 `host_id`，并生成展示用短 `machine_id` 和本次运行的 TOTP seed。
+4. 被控端连接 `/ws/host`。
+5. 被控端发送不含 token 的 `host.hello`，包含 `host_id`、短 `machine_id` 和协议版本。
+6. 服务端按 `host_id` 登记在线主机，同时维护短 `machine_id -> host_id` 索引。
+7. 被控端复制连接信息到剪贴板。
+8. 被控端设置运行期间阻止系统休眠和显示器熄屏。
+9. 被控端进入等待控制状态。
 
 ### 会话创建
 
 1. 控制端连接 `/ws/control`。
-2. 控制端发送 `control.open`，包含控制 token、机器 ID 和 TOTP。
+2. 控制端发送 `control.open`，包含控制 token、展示短 machine ID 和 TOTP；短码冲突时可额外携带当前运行期 `host_id` 精确寻址。
 3. 服务端校验控制 token。
-4. 服务端找到在线主机，并转发 `host.auth_request`。
+4. 服务端默认用短 machine ID 查找在线主机；短码唯一时转发 `host.auth_request`，短码重复时返回明确错误。请求携带 `host_id` 时服务端按 `host_id` 精确查找，并校验它当前登记的短 machine ID 与请求一致。
 5. 被控端本地验证 TOTP。
 6. 服务端创建 session，并返回 session token。
 7. 控制端保存 session token 到本地。
@@ -150,15 +152,17 @@ remote-control-for-windows/
 
 服务端内存状态：
 
-- 在线主机表：`machine_id -> host_connection`。
-- 会话表：`session_id -> machine_id, controller, created_at, last_seen`。
-- 待处理请求表：`request_id -> response_channel`。
-- server-owned exec job 表：`task_id -> status/stdout/stderr/complete/error`。
+- 在线主机表：`host_id -> host_connection(machine_id, connection_id, tx)`。
+- 展示短码索引：`machine_id -> host_id set`，只用于控制端输入短码后的查找和冲突检测。
+- 会话表：`session_id -> host_id, machine_id, connection_id, controller, created_at, last_seen`。
+- 待处理请求表：`request_id -> session_id, host_id, connection_id, response_channel`。
+- server-owned exec job 表：`task_id -> host_id, connection_id, session_id, status/stdout/stderr/complete/error`。
 - 审计写入器：按结构化日志记录事件，不参与会话状态恢复。
 
 被控端状态：
 
 - 服务器连接状态。
+- 本次进程运行期 host ID。
 - 当前 TOTP seed。
 - 当前 session。
 - 正在执行的请求。
@@ -179,14 +183,15 @@ remote-control-for-windows/
 ## 并发模型
 
 - 当前基线中，一个被控端同一时间只允许一个 active session。
-- 控制端可以在重新验证当前 TOTP 后使用 force reconnect 替换同一被控端的旧 session。
-- 同一 session 内普通命令默认串行执行，避免鼠标键盘和截图状态混乱；后台 exec 是 server-owned job，文件传输仍依赖控制端进程持续读写本地文件。
-- 当前基线中，文件传输作为长命令处理，不与其他命令并发执行。
-- 后续可以扩展为命令执行并发、输入类命令串行。
+- 控制端可以在重新验证当前 TOTP 后使用 force reconnect 替换同一 `host_id` 的旧 session。
+- 同一 session 内允许多个命令并发发起和执行；服务端和被控端都按 `request_id` 路由结果。
+- 长命令 `exec` 和 `download` 在 host 侧异步执行，发送输出或 binary chunk 时只短暂持有 WebSocket sink 锁，避免把同 session 的其他 request 串行化。
+- upload/download 仍依赖控制端进程持续读写本地文件；MCP 的后台 transfer 只在当前 MCP 进程存活期间有效。
+- 输入类命令当前不做全局串行锁；如果后续需要多人协作或复杂 GUI 操作，再单独设计输入 FIFO/lease。
 
 ## 失败处理
 
-- 被控端断开：服务端注销主机并使相关 session 失效。
+- 被控端断开：服务端只在断开的 `connection_id` 仍是当前连接时注销主机并使相关 session 失效；旧连接迟到断开不会误删重连后的新连接。
 - 控制端断开：session 可以短时间保留，便于 CLI 多子命令复用；后台清理器会回收长期空闲 session、过期 pending open、过期请求路由和空的限流 key。
 - exec 后台任务：`command.start` 创建 server-owned exec job；host 负责执行进程，server 保留有限 stdout/stderr、完成状态和错误，短 CLI 或 MCP 都可后续查询或取消。
 - 文件传输任务：upload/download 是 client-attached stream；没有控制端 daemon 或 server staging 时，CLI 退出后无法继续读取本地源文件或写入本地目标文件。MCP 只能在本 MCP 进程存活期间后台传输。
