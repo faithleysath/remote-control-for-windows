@@ -38,12 +38,12 @@ pub(super) struct ExecParams {
     pub(super) cwd: Option<String>,
     #[serde(default = "default_exec_timeout_ms")]
     #[schemars(
-        description = "Maximum remote process runtime in milliseconds. Defaults to 24 hours."
+        description = "Maximum runtime for the remote process in milliseconds. Defaults to 24 hours. This is enforced on the Windows host and is separate from wait_ms; when it expires, the host kills the remote process tree and the exec task finishes with a timeout/error status."
     )]
     pub(super) timeout_ms: Option<u64>,
     #[serde(default = "default_mcp_exec_wait_ms")]
     #[schemars(
-        description = "MCP tool call wait window in milliseconds. Defaults to 90 seconds; use 0 to return a task_id immediately."
+        description = "MCP tool call wait window in milliseconds. Defaults to 90 seconds. Use 0 to return a task_id immediately; non-zero values wait up to this many milliseconds for completion, then return the current task status if still running."
     )]
     pub(super) wait_ms: u64,
 }
@@ -62,7 +62,7 @@ pub(super) struct UploadFileParams {
     pub(super) sha256: Option<String>,
     #[serde(default = "default_mcp_transfer_wait_ms")]
     #[schemars(
-        description = "MCP tool call wait window in milliseconds. Defaults to 60 seconds; use 0 to return a task_id immediately."
+        description = "MCP tool call wait window in milliseconds. Defaults to 60 seconds. Use 0 to return a task_id immediately; non-zero values wait up to this many milliseconds for completion, then return the current transfer status if still running."
     )]
     pub(super) wait_ms: u64,
 }
@@ -78,7 +78,7 @@ pub(super) struct DownloadFileParams {
     pub(super) overwrite: bool,
     #[serde(default = "default_mcp_transfer_wait_ms")]
     #[schemars(
-        description = "MCP tool call wait window in milliseconds. Defaults to 60 seconds; use 0 to return a task_id immediately."
+        description = "MCP tool call wait window in milliseconds. Defaults to 60 seconds. Use 0 to return a task_id immediately; non-zero values wait up to this many milliseconds for completion, then return the current transfer status if still running."
     )]
     pub(super) wait_ms: u64,
 }
