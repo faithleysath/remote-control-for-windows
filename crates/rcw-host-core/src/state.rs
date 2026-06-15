@@ -15,6 +15,7 @@ const AUTH_HISTORY_LIMIT: usize = 50;
 const TASK_HISTORY_LIMIT: usize = 100;
 const TUNNEL_HISTORY_LIMIT: usize = 100;
 const RECENT_ERROR_LIMIT: usize = 50;
+const EVENT_HISTORY_LIMIT: usize = 200;
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +226,7 @@ pub struct HostSnapshot {
     pub transfers: Vec<HostTransferTaskSnapshot>,
     pub tunnels: Vec<HostTunnelSnapshot>,
     pub recent_errors: Vec<HostErrorSnapshot>,
+    pub events: Vec<HostEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +278,7 @@ impl HostStateHandle {
             transfers: Vec::new(),
             tunnels: Vec::new(),
             recent_errors: Vec::new(),
+            events: Vec::new(),
         };
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
@@ -739,11 +742,14 @@ impl HostStateHandle {
     where
         F: FnOnce(&mut HostStateInner),
     {
+        let emitted_event = event.clone();
         {
             let mut inner = self.inner.lock().expect("host state lock poisoned");
             f(&mut inner);
+            inner.snapshot.events.push(event);
+            trim_vec(&mut inner.snapshot.events, EVENT_HISTORY_LIMIT);
         }
-        let _ = self.events.send(event);
+        let _ = self.events.send(emitted_event);
     }
 
     fn trim_tunnel_history(&self, keep_id: &str) {
@@ -1085,6 +1091,9 @@ mod tests {
         assert_eq!(snapshot.commands[0].request_id, "req");
         assert_eq!(snapshot.commands[0].status, HostTaskStatus::Completed);
         assert_eq!(snapshot.commands[0].duration_ms, Some(12));
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(snapshot.events[0].kind, HostEventKind::CommandStarted);
+        assert_eq!(snapshot.events[1].kind, HostEventKind::CommandCompleted);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
 };
 
@@ -276,6 +277,13 @@ async fn host_copy_connection_info(state: State<'_, GuiState>) -> CommandResult<
     }
 }
 
+#[tauri::command]
+async fn host_reveal_audit_location(state: State<'_, GuiState>) -> CommandResult<PathBuf> {
+    let audit_path = state.service.lock().await.snapshot().audit_path;
+    reveal_file_location(&audit_path)?;
+    Ok(audit_path)
+}
+
 fn main() {
     tracing_subscriber::fmt().compact().init();
 
@@ -307,7 +315,8 @@ fn main() {
             host_stop_listener,
             host_restart_listener,
             host_copy_connection_info,
-            host_close_current_session
+            host_close_current_session,
+            host_reveal_audit_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running rcw-host-gui");
@@ -416,6 +425,33 @@ fn write_gui_settings(path: &Path, settings: &GuiSettings) -> CommandResult<()> 
 
 fn non_empty_path(value: &str) -> Option<PathBuf> {
     (!value.trim().is_empty()).then(|| PathBuf::from(value.trim()))
+}
+
+fn reveal_file_location(path: &Path) -> CommandResult<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        command.arg(format!("/select,{}", path.display()));
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg("-R").arg(path);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let directory = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut command = Command::new("xdg-open");
+        command.arg(directory);
+        command
+    };
+
+    command.spawn().map_err(to_command_error)?;
+    Ok(())
 }
 
 fn start_host_listener(service: Arc<Mutex<HostService>>) {

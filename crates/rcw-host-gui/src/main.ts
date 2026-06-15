@@ -27,8 +27,19 @@ type HostEventKind =
   | "tunnel_closed"
   | "error_recorded";
 
-type Tab = "overview" | "session" | "settings";
+type Tab = "overview" | "session" | "audit" | "settings";
 type NoticeTone = "ok" | "warn" | "bad";
+type AuditTypeFilter =
+  | "all"
+  | "session"
+  | "exec"
+  | "transfer"
+  | "tunnel"
+  | "input"
+  | "error"
+  | "system";
+type AuditCategory = Exclude<AuditTypeFilter, "all">;
+type AuditSortOrder = "desc" | "asc";
 
 interface HostEvent {
   time: string;
@@ -45,6 +56,47 @@ interface HostAuthRequest {
   controller_label: string;
   at: string;
   ok: boolean;
+}
+
+interface HostCommandTask {
+  request_id: string;
+  session_id?: string;
+  command: string;
+  status: string;
+  started_at: string;
+  finished_at?: string;
+  result?: string;
+  duration_ms?: number;
+  summary?: string;
+}
+
+interface HostTransferTask {
+  request_id: string;
+  session_id?: string;
+  direction: "upload" | "download";
+  status: string;
+  started_at: string;
+  finished_at?: string;
+  size?: number;
+  bytes_transferred: number;
+  result?: string;
+  summary?: string;
+}
+
+interface HostTunnelTask {
+  tunnel_id: string;
+  session_id?: string;
+  direction: "local" | "remote";
+  listen_addr: string;
+  listen_port: number;
+  target_host: string;
+  target_port: number;
+  status: string;
+  opened_at: string;
+  last_activity_at: string;
+  active_streams: number;
+  total_streams: number;
+  close_reason?: string;
 }
 
 interface HostSnapshot {
@@ -74,10 +126,11 @@ interface HostSnapshot {
     last_close_reason?: string;
   };
   auth_requests: HostAuthRequest[];
-  commands: unknown[];
-  transfers: unknown[];
-  tunnels: unknown[];
+  commands: HostCommandTask[];
+  transfers: HostTransferTask[];
+  tunnels: HostTunnelTask[];
   recent_errors: Array<{ at: string; summary: string }>;
+  events?: HostEvent[];
 }
 
 interface HostSettingsView {
@@ -101,6 +154,13 @@ interface SettingsFormState {
   totp_period_seconds: string;
   audit_log_path: string;
   auto_listen: boolean;
+}
+
+interface AuditFilters {
+  session_id: string;
+  query: string;
+  type: AuditTypeFilter;
+  order: AuditSortOrder;
 }
 
 interface HostActionOutcome {
@@ -127,6 +187,7 @@ interface AppState {
   settings: HostSettingsView | null;
   settingsForm: SettingsFormState;
   settingsDirty: boolean;
+  auditFilters: AuditFilters;
   events: HostEvent[];
   loadError: string | null;
   notice: { tone: NoticeTone; text: string } | null;
@@ -135,7 +196,8 @@ interface AppState {
   activeTab: Tab;
 }
 
-const MAX_EVENTS = 24;
+const MAX_EVENTS = 200;
+const AUDIT_RENDER_LIMIT = 100;
 const app = document.querySelector<HTMLDivElement>("#app");
 
 const state: AppState = {
@@ -143,6 +205,12 @@ const state: AppState = {
   settings: null,
   settingsForm: emptySettingsForm(),
   settingsDirty: false,
+  auditFilters: {
+    session_id: "",
+    query: "",
+    type: "all",
+    order: "desc",
+  },
   events: [],
   loadError: null,
   notice: null,
@@ -258,18 +326,213 @@ function renderDataRow(label: string, value: unknown, options: { code?: boolean 
   `;
 }
 
-function renderEvent(event: HostEvent): string {
-  const summary = event.summary ?? event.status ?? event.kind;
-  const meta = [event.command, event.request_id, event.session_id]
+function eventKey(event: HostEvent): string {
+  return [
+    event.time,
+    event.kind,
+    event.request_id ?? "",
+    event.session_id ?? "",
+    event.command ?? "",
+    event.status ?? "",
+    event.summary ?? "",
+  ].join("|");
+}
+
+function normalizeSnapshotEvents(events: HostEvent[] | undefined): HostEvent[] {
+  const seen = new Set<string>();
+  return (events ?? [])
+    .slice()
+    .reverse()
+    .filter((event) => {
+      const key = eventKey(event);
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, MAX_EVENTS);
+}
+
+function prependEvent(event: HostEvent, events: HostEvent[]): HostEvent[] {
+  const key = eventKey(event);
+  return [event, ...events.filter((item) => eventKey(item) !== key)].slice(0, MAX_EVENTS);
+}
+
+function eventCategory(event: HostEvent): AuditCategory {
+  if (event.kind === "error_recorded") {
+    return "error";
+  }
+  if (
+    event.kind === "auth_requested" ||
+    event.kind === "session_opened" ||
+    event.kind === "session_closed"
+  ) {
+    return "session";
+  }
+  if (
+    event.kind === "transfer_started" ||
+    event.kind === "transfer_progress" ||
+    event.kind === "transfer_completed"
+  ) {
+    return "transfer";
+  }
+  if (event.kind === "tunnel_opened" || event.kind === "tunnel_closed") {
+    return "tunnel";
+  }
+  if (
+    event.kind === "command_started" ||
+    event.kind === "command_completed" ||
+    event.kind === "command_cancel_requested"
+  ) {
+    return commandCategory(event.command);
+  }
+  return "system";
+}
+
+function commandCategory(command?: string): AuditCategory {
+  if (!command) {
+    return "exec";
+  }
+  if (command === "upload.begin" || command === "download.begin") {
+    return "transfer";
+  }
+  if (command.startsWith("keyboard.") || command.startsWith("mouse.")) {
+    return "input";
+  }
+  return "exec";
+}
+
+function isErrorEvent(event: HostEvent): boolean {
+  return (
+    event.kind === "error_recorded" ||
+    event.status === "failed" ||
+    event.status === "cancelled" ||
+    event.status === "error"
+  );
+}
+
+function eventResult(event: HostEvent): string {
+  return event.status ?? (isErrorEvent(event) ? "error" : "ok");
+}
+
+function eventSummary(event: HostEvent): string {
+  return event.summary ?? event.status ?? event.kind.replaceAll("_", " ");
+}
+
+function eventTaskId(event: HostEvent): string | undefined {
+  return event.request_id;
+}
+
+function matchingCommandTask(event: HostEvent): HostCommandTask | undefined {
+  if (!event.request_id) {
+    return undefined;
+  }
+  return state.snapshot?.commands.find((task) => task.request_id === event.request_id);
+}
+
+function matchingTransferTask(event: HostEvent): HostTransferTask | undefined {
+  if (!event.request_id) {
+    return undefined;
+  }
+  return state.snapshot?.transfers.find((task) => task.request_id === event.request_id);
+}
+
+function eventDuration(event: HostEvent): number | undefined {
+  return matchingCommandTask(event)?.duration_ms;
+}
+
+function eventDetail(event: HostEvent): Record<string, unknown> {
+  const commandTask = matchingCommandTask(event);
+  const transferTask = matchingTransferTask(event);
+  return {
+    category: eventCategory(event),
+    result: eventResult(event),
+    task_id: eventTaskId(event),
+    duration_ms: eventDuration(event),
+    event,
+    task: commandTask ?? transferTask ?? null,
+  };
+}
+
+function matchesAuditType(event: HostEvent, type: AuditTypeFilter): boolean {
+  if (type === "all") {
+    return true;
+  }
+  if (type === "error") {
+    return isErrorEvent(event);
+  }
+  return eventCategory(event) === type;
+}
+
+function searchableEventText(event: HostEvent): string {
+  return [
+    event.time,
+    event.kind,
+    event.request_id,
+    event.session_id,
+    event.command,
+    event.status,
+    event.summary,
+    eventCategory(event),
+  ]
     .filter(Boolean)
-    .join(" · ");
+    .join(" ")
+    .toLowerCase();
+}
+
+function filteredAuditEvents(): HostEvent[] {
+  const filters = state.auditFilters;
+  const sessionFilter = filters.session_id.trim().toLowerCase();
+  const query = filters.query.trim().toLowerCase();
+  const events = state.events.filter((event) => {
+    if (sessionFilter && !String(event.session_id ?? "").toLowerCase().includes(sessionFilter)) {
+      return false;
+    }
+    if (!matchesAuditType(event, filters.type)) {
+      return false;
+    }
+    if (query && !searchableEventText(event).includes(query)) {
+      return false;
+    }
+    return true;
+  });
+
+  return filters.order === "asc" ? events.slice().reverse() : events;
+}
+
+function renderAuditMeta(label: string, value: unknown): string {
+  return value
+    ? `<span><strong>${escapeHtml(label)}</strong><code>${display(value)}</code></span>`
+    : "";
+}
+
+function renderAuditEvent(event: HostEvent): string {
+  const category = eventCategory(event);
+  const result = eventResult(event);
+  const duration = eventDuration(event);
+  const detail = JSON.stringify(eventDetail(event), null, 2);
   return `
-    <li class="event-row">
-      <span class="event-time">${escapeHtml(formatDate(event.time))}</span>
-      <span class="event-kind">${escapeHtml(event.kind.replaceAll("_", " "))}</span>
-      <span class="event-summary">${escapeHtml(summary)}</span>
-      ${meta ? `<span class="event-meta">${escapeHtml(meta)}</span>` : ""}
-    </li>
+    <article class="audit-row">
+      <div class="audit-row-main">
+        <span class="audit-time">${escapeHtml(formatDate(event.time))}</span>
+        <span class="type-chip ${category}">${escapeHtml(category)}</span>
+        <strong>${escapeHtml(event.kind.replaceAll("_", " "))}</strong>
+        <span class="result ${isErrorEvent(event) ? "bad" : "ok"}">${escapeHtml(result)}</span>
+      </div>
+      <p class="audit-summary">${escapeHtml(eventSummary(event))}</p>
+      <div class="audit-meta">
+        ${renderAuditMeta("session", event.session_id)}
+        ${renderAuditMeta("request", event.request_id)}
+        ${renderAuditMeta("task", eventTaskId(event))}
+        ${renderAuditMeta("command", event.command)}
+        ${duration === undefined ? "" : renderAuditMeta("duration", `${duration}ms`)}
+      </div>
+      <details class="audit-detail">
+        <summary>Details JSON</summary>
+        <pre>${escapeHtml(detail)}</pre>
+      </details>
+    </article>
   `;
 }
 
@@ -288,6 +551,7 @@ function renderTabs(): string {
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: "overview", label: "Overview" },
     { id: "session", label: "Session" },
+    { id: "audit", label: "Audit" },
     { id: "settings", label: "Settings" },
   ];
   return `
@@ -385,7 +649,6 @@ function renderOverview(snapshot: HostSnapshot | null): string {
         <p class="muted">Listener updated ${escapeHtml(formatDate(snapshot?.listener.updated_at))}</p>
       </div>
     </section>
-    ${renderEvents()}
   `;
 }
 
@@ -425,7 +688,6 @@ function renderSession(snapshot: HostSnapshot | null): string {
         </ul>
       </div>
     </section>
-    ${renderEvents()}
   `;
 }
 
@@ -498,27 +760,106 @@ function renderSettings(snapshot: HostSnapshot | null): string {
   `;
 }
 
-function renderEvents(): string {
+function renderAudit(): string {
+  const hasAuditPath = Boolean(state.snapshot?.audit_path);
   return `
-    <section class="events" aria-label="Host events">
-      <div class="events-header">
-        <h2>Event Stream</h2>
-        <span>${escapeHtml(formatCount(state.events.length))} recent</span>
+    <section class="audit-layout" aria-label="Host audit timeline">
+      <form id="audit-filters" class="panel audit-filters">
+        <span class="section-label">Audit filters</span>
+        <label>
+          <span>Session ID</span>
+          <input
+            id="audit-session-filter"
+            type="search"
+            value="${escapeHtml(state.auditFilters.session_id)}"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          <span>Request or task</span>
+          <input
+            id="audit-query-filter"
+            type="search"
+            value="${escapeHtml(state.auditFilters.query)}"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          <span>Type</span>
+          <select id="audit-type-filter">
+            ${renderAuditTypeOptions()}
+          </select>
+        </label>
+        <label>
+          <span>Order</span>
+          <select id="audit-order-filter">
+            <option value="desc" ${state.auditFilters.order === "desc" ? "selected" : ""}>Newest first</option>
+            <option value="asc" ${state.auditFilters.order === "asc" ? "selected" : ""}>Oldest first</option>
+          </select>
+        </label>
+        <div class="button-row">
+          <button id="clear-audit-filters" type="button">Clear</button>
+          <button id="copy-audit-path" type="button" ${disabledAttr(!hasAuditPath || state.busyAction !== null)}>
+            ${busyLabel("copy-audit", "Copy Path")}
+          </button>
+          <button id="reveal-audit-location" type="button" ${disabledAttr(!hasAuditPath || state.busyAction !== null)}>
+            ${busyLabel("reveal-audit", "Reveal")}
+          </button>
+        </div>
+        <p class="path">${display(state.snapshot?.audit_path, "Audit path pending")}</p>
+      </form>
+
+      <div class="audit-timeline">
+        ${renderAuditTimeline()}
       </div>
-      <ul>
-        ${
-          state.events.length > 0
-            ? state.events.map(renderEvent).join("")
-            : `<li class="empty">Waiting for host events</li>`
-        }
-      </ul>
     </section>
   `;
+}
+
+function renderAuditTimeline(): string {
+  const events = filteredAuditEvents();
+  const renderedEvents = events.slice(0, AUDIT_RENDER_LIMIT);
+  return `
+    <div class="audit-summary-bar">
+      <span>${escapeHtml(formatCount(renderedEvents.length))} shown</span>
+      <span>${escapeHtml(formatCount(events.length))} matched</span>
+      <span>${escapeHtml(formatCount(state.events.length))} retained</span>
+    </div>
+    <div class="audit-list">
+      ${
+        renderedEvents.length > 0
+          ? renderedEvents.map(renderAuditEvent).join("")
+          : `<div class="empty">No matching events</div>`
+      }
+    </div>
+  `;
+}
+
+function renderAuditTypeOptions(): string {
+  const options: Array<{ value: AuditTypeFilter; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "session", label: "Session" },
+    { value: "exec", label: "Exec" },
+    { value: "transfer", label: "Transfer" },
+    { value: "tunnel", label: "Tunnel" },
+    { value: "input", label: "Input" },
+    { value: "error", label: "Error" },
+    { value: "system", label: "System" },
+  ];
+  return options
+    .map(
+      (option) =>
+        `<option value="${option.value}" ${state.auditFilters.type === option.value ? "selected" : ""}>${option.label}</option>`,
+    )
+    .join("");
 }
 
 function renderContent(): string {
   if (state.activeTab === "session") {
     return renderSession(state.snapshot);
+  }
+  if (state.activeTab === "audit") {
+    return renderAudit();
   }
   if (state.activeTab === "settings") {
     return renderSettings(state.snapshot);
@@ -564,6 +905,9 @@ function bindUi(): void {
   bindClick("#tab-session", () => {
     switchTab("session");
   });
+  bindClick("#tab-audit", () => {
+    switchTab("audit");
+  });
   bindClick("#tab-settings", () => {
     switchTab("settings");
   });
@@ -584,6 +928,7 @@ function bindUi(): void {
   });
 
   bindSettingsForm();
+  bindAuditFilters();
 }
 
 function bindClick(selector: string, handler: () => void): void {
@@ -620,12 +965,64 @@ function bindSettingsForm(): void {
   });
 }
 
+function bindAuditFilters(): void {
+  bindAuditTextInput("#audit-session-filter", (value) => {
+    state.auditFilters.session_id = value;
+  });
+  bindAuditTextInput("#audit-query-filter", (value) => {
+    state.auditFilters.query = value;
+  });
+
+  const typeFilter = document.querySelector<HTMLSelectElement>("#audit-type-filter");
+  typeFilter?.addEventListener("change", () => {
+    state.auditFilters.type = typeFilter.value as AuditTypeFilter;
+    refreshAuditTimeline();
+  });
+
+  const orderFilter = document.querySelector<HTMLSelectElement>("#audit-order-filter");
+  orderFilter?.addEventListener("change", () => {
+    state.auditFilters.order = orderFilter.value as AuditSortOrder;
+    refreshAuditTimeline();
+  });
+
+  bindClick("#clear-audit-filters", () => {
+    state.auditFilters = {
+      session_id: "",
+      query: "",
+      type: "all",
+      order: "desc",
+    };
+    render();
+  });
+  bindClick("#copy-audit-path", () => {
+    void copyAuditPath();
+  });
+  bindClick("#reveal-audit-location", () => {
+    void revealAuditLocation();
+  });
+}
+
 function bindTextInput(selector: string, update: (value: string) => void): void {
   const input = document.querySelector<HTMLInputElement>(selector);
   input?.addEventListener("input", () => {
     state.settingsDirty = true;
     update(input.value);
   });
+}
+
+function bindAuditTextInput(selector: string, update: (value: string) => void): void {
+  const input = document.querySelector<HTMLInputElement>(selector);
+  input?.addEventListener("input", () => {
+    update(input.value);
+    refreshAuditTimeline();
+  });
+}
+
+function refreshAuditTimeline(): void {
+  const timeline = document.querySelector<HTMLDivElement>(".audit-timeline");
+  if (timeline) {
+    timeline.innerHTML = renderAuditTimeline();
+  }
 }
 
 async function refreshSnapshot(): Promise<void> {
@@ -635,6 +1032,7 @@ async function refreshSnapshot(): Promise<void> {
 
   try {
     state.snapshot = await invoke<HostSnapshot>("host_snapshot");
+    state.events = normalizeSnapshotEvents(state.snapshot.events);
   } catch (error) {
     state.loadError = error instanceof Error ? error.message : String(error);
   } finally {
@@ -704,6 +1102,51 @@ async function copyConnectionInfo(): Promise<void> {
   }
 }
 
+async function copyAuditPath(): Promise<void> {
+  const auditPath = state.snapshot?.audit_path;
+  if (!auditPath) {
+    state.notice = { tone: "bad", text: "Audit path is not ready" };
+    render();
+    return;
+  }
+
+  state.busyAction = "copy-audit";
+  state.notice = null;
+  render();
+
+  try {
+    await navigator.clipboard.writeText(auditPath);
+    state.notice = { tone: "ok", text: "Audit path copied" };
+  } catch (error) {
+    state.notice = {
+      tone: "bad",
+      text: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
+async function revealAuditLocation(): Promise<void> {
+  state.busyAction = "reveal-audit";
+  state.notice = null;
+  render();
+
+  try {
+    await invoke<string>("host_reveal_audit_location");
+    state.notice = { tone: "ok", text: "Audit location opened" };
+  } catch (error) {
+    state.notice = {
+      tone: "bad",
+      text: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
 async function saveSettings(): Promise<void> {
   const period = Number(state.settingsForm.totp_period_seconds);
   if (!Number.isInteger(period) || period <= 0) {
@@ -746,7 +1189,7 @@ async function saveSettings(): Promise<void> {
 async function boot(): Promise<void> {
   render();
   await listen<HostEvent>("host-event", (event) => {
-    state.events = [event.payload, ...state.events].slice(0, MAX_EVENTS);
+    state.events = prependEvent(event.payload, state.events);
     void refreshSnapshot();
   });
   try {
