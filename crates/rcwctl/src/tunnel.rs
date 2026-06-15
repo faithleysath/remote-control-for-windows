@@ -85,6 +85,7 @@ pub(crate) struct TunnelManager {
 struct TunnelManagerInner {
     sink: Mutex<WsSink>,
     streams: Mutex<HashMap<String, ControllerTunnelStream>>,
+    local_listeners: Mutex<HashMap<String, JoinHandle<()>>>,
     pending: Mutex<HashMap<String, oneshot::Sender<WireMessage>>>,
     tunnels: Mutex<HashMap<String, String>>,
     session_id: String,
@@ -107,6 +108,7 @@ impl TunnelManager {
             inner: Arc::new(TunnelManagerInner {
                 sink: Mutex::new(sink),
                 streams: Mutex::new(HashMap::new()),
+                local_listeners: Mutex::new(HashMap::new()),
                 pending: Mutex::new(HashMap::new()),
                 tunnels: Mutex::new(HashMap::new()),
                 session_id: session.session_id.clone(),
@@ -268,18 +270,41 @@ impl TunnelManager {
         })
     }
 
+    pub(crate) async fn close_owned(
+        &self,
+        config: &ControllerConfig,
+        store: &dyn SessionStore,
+        request_id: &str,
+        tunnel_id: &str,
+    ) -> Result<TunnelCloseResult> {
+        let result = Self::close(config, store, request_id, tunnel_id).await?;
+        self.cleanup_tunnel_local(tunnel_id).await;
+        self.inner.tunnels.lock().await.remove(tunnel_id);
+        Ok(result)
+    }
+
     pub(crate) async fn shutdown(&self) {
+        let listener_ids = {
+            let listeners = self.inner.local_listeners.lock().await;
+            listeners.keys().cloned().collect::<Vec<_>>()
+        };
+        for tunnel_id in listener_ids {
+            self.abort_local_listener(&tunnel_id).await;
+        }
         let keys = {
             let streams = self.inner.streams.lock().await;
             streams.keys().cloned().collect::<Vec<_>>()
         };
         let mut streams = self.inner.streams.lock().await;
-        for key in keys {
-            if let Some(stream) = streams.remove(&key) {
-                stream.handle.abort();
-            }
-        }
+        let streams_to_abort = keys
+            .into_iter()
+            .filter_map(|key| streams.remove(&key))
+            .collect::<Vec<_>>();
         drop(streams);
+        for stream in streams_to_abort {
+            stream.handle.abort();
+            let _ = stream.handle.await;
+        }
         let tunnel_ids = {
             let tunnels = self.inner.tunnels.lock().await;
             tunnels.keys().cloned().collect::<Vec<_>>()
@@ -293,12 +318,13 @@ impl TunnelManager {
                         Some(self.inner.session_id.clone()),
                         TunnelClosePayload {
                             session_token: self.inner.session_token.clone(),
-                            tunnel_id,
+                            tunnel_id: tunnel_id.clone(),
                         },
                     )
                     .expect("tunnel close serializes"),
                 )
                 .await;
+            self.cleanup_tunnel_streams(&tunnel_id).await;
         }
         self.inner.tunnels.lock().await.clear();
         let mut sink = self.inner.sink.lock().await;
@@ -311,7 +337,8 @@ impl TunnelManager {
             .await
             .with_context(|| format!("failed to bind local tunnel listener {bind_addr}"))?;
         let manager = self.clone();
-        tokio::spawn(async move {
+        let tunnel_id = tunnel.tunnel_id.clone();
+        let handle = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
@@ -340,6 +367,11 @@ impl TunnelManager {
                     .await;
             }
         });
+        self.inner
+            .local_listeners
+            .lock()
+            .await
+            .insert(tunnel_id, handle);
         Ok(())
     }
 
@@ -561,8 +593,44 @@ impl TunnelManager {
 
     async fn remove_stream(&self, tunnel_id: &str, stream_id: &str) {
         let mut streams = self.inner.streams.lock().await;
-        if let Some(stream) = streams.remove(&stream_key(tunnel_id, stream_id)) {
+        let stream = streams.remove(&stream_key(tunnel_id, stream_id));
+        drop(streams);
+        if let Some(stream) = stream {
             stream.handle.abort();
+            let _ = stream.handle.await;
+        }
+    }
+
+    async fn cleanup_tunnel_local(&self, tunnel_id: &str) {
+        self.abort_local_listener(tunnel_id).await;
+        self.cleanup_tunnel_streams(tunnel_id).await;
+    }
+
+    async fn abort_local_listener(&self, tunnel_id: &str) {
+        let mut listeners = self.inner.local_listeners.lock().await;
+        let handle = listeners.remove(tunnel_id);
+        drop(listeners);
+        if let Some(handle) = handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    async fn cleanup_tunnel_streams(&self, tunnel_id: &str) {
+        let mut streams = self.inner.streams.lock().await;
+        let keys = streams
+            .keys()
+            .filter(|key| stream_tunnel_id(key) == tunnel_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let streams_to_abort = keys
+            .into_iter()
+            .filter_map(|key| streams.remove(&key))
+            .collect::<Vec<_>>();
+        drop(streams);
+        for stream in streams_to_abort {
+            stream.handle.abort();
+            let _ = stream.handle.await;
         }
     }
 
@@ -749,9 +817,21 @@ fn stream_key(tunnel_id: &str, stream_id: &str) -> String {
     format!("{tunnel_id}/{stream_id}")
 }
 
+fn stream_tunnel_id(key: &str) -> &str {
+    key.split_once('/').map_or(key, |(tunnel_id, _)| tunnel_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        controller_config::ControllerConfig,
+        session::{MemorySessionStore, SessionFile, SessionStore},
+    };
+    use futures_util::StreamExt;
+    use rcw_common::protocol::TunnelStatus;
+    use tokio::net::TcpListener as TokioTcpListener;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn parses_forward_spec() {
@@ -761,5 +841,69 @@ mod tests {
         assert_eq!(spec.listen_port, 15432);
         assert_eq!(spec.target_host, "127.0.0.1");
         assert_eq!(spec.target_port, 5432);
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_local_listener_port() {
+        let ws_listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = ws_listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            while websocket.next().await.is_some() {}
+        });
+        let session = SessionFile {
+            server: format!("http://{server_addr}"),
+            machine_id: "machine-test".to_owned(),
+            session_id: "session-test".to_owned(),
+            session_token: "token-test".to_owned(),
+            created_at: "2026-06-15T00:00:00Z".to_owned(),
+            last_used_at: "2026-06-15T00:00:00Z".to_owned(),
+        };
+        let store = MemorySessionStore::default();
+        store.write_session(&session).unwrap();
+        let config = ControllerConfig {
+            server: None,
+            token: None,
+            audit_label: None,
+        };
+        let manager = TunnelManager::connect(&config, &store).await.unwrap();
+        let port_probe = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_port = port_probe.local_addr().unwrap().port();
+        drop(port_probe);
+        let tunnel = TunnelInfo {
+            tunnel_id: "tunnel-test".to_owned(),
+            session_id: session.session_id,
+            direction: TunnelDirection::Local,
+            listen_addr: "127.0.0.1".to_owned(),
+            listen_port,
+            target_host: "127.0.0.1".to_owned(),
+            target_port: 22,
+            status: TunnelStatus::Active,
+            opened_at: "2026-06-15T00:00:00Z".to_owned(),
+            last_activity_at: "2026-06-15T00:00:00Z".to_owned(),
+            idle_timeout_ms: DEFAULT_TUNNEL_IDLE_TIMEOUT_MS,
+            bytes_from_listener: 0,
+            bytes_from_target: 0,
+            active_streams: 0,
+            total_streams: 0,
+            close_reason: None,
+        };
+        manager.spawn_local_listener(tunnel.clone()).await.unwrap();
+        manager
+            .inner
+            .tunnels
+            .lock()
+            .await
+            .insert(tunnel.tunnel_id.clone(), "token-test".to_owned());
+
+        manager.shutdown().await;
+
+        let rebound = TokioTcpListener::bind(("127.0.0.1", listen_port)).await;
+        assert!(
+            rebound.is_ok(),
+            "local tunnel listener port was not released: {:?}",
+            rebound.err()
+        );
     }
 }

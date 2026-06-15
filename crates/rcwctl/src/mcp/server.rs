@@ -582,13 +582,28 @@ impl RcwMcpServer {
             .map_err(|_| "tunnel task lock poisoned".to_owned())?
             .remove(&params.tunnel_id);
         let result = async {
-            let result =
-                TunnelManager::close(&self.config, &self.store(), &request_id, &params.tunnel_id)
-                    .await?;
             if let Some(record) = record {
-                record.manager.shutdown().await;
+                match record
+                    .manager
+                    .close_owned(&self.config, &self.store(), &request_id, &params.tunnel_id)
+                    .await
+                {
+                    Ok(result) => {
+                        record.manager.shutdown().await;
+                        Ok(result)
+                    }
+                    Err(err) => {
+                        self.tunnels
+                            .lock()
+                            .map_err(|_| anyhow!("tunnel task lock poisoned"))?
+                            .insert(params.tunnel_id.clone(), record);
+                        Err(err)
+                    }
+                }
+            } else {
+                TunnelManager::close(&self.config, &self.store(), &request_id, &params.tunnel_id)
+                    .await
             }
-            Ok(result)
         }
         .await;
         self.audit(
