@@ -44,8 +44,7 @@ git push origin v0.1.8
      cargo xwin clippy -p rcw-host --target x86_64-pc-windows-msvc --release -- -D warnings
    RUSTFLAGS='-C target-feature=+crt-static' \
      cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
-   (cd crates/rcw-host-gui && RUSTFLAGS='-C target-feature=+crt-static' \
-     npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target x86_64-pc-windows-msvc --no-bundle --ci)
+   npm --prefix crates/rcw-host-gui run tauri:build:windows:x64
    ```
 
 5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
@@ -106,8 +105,7 @@ target/x86_64-pc-windows-msvc/release/rcw-host.exe
 
 ```bash
 npm --prefix crates/rcw-host-gui ci
-(cd crates/rcw-host-gui && RUSTFLAGS='-C target-feature=+crt-static' \
-  npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target x86_64-pc-windows-msvc --no-bundle --ci)
+npm --prefix crates/rcw-host-gui run tauri:build:windows:x64
 ```
 
 预期 host GUI 产物：

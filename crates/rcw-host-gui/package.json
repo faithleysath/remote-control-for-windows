@@ -8,7 +8,9 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:windows:x64": "RUSTFLAGS='-C target-feature=+crt-static' tauri build --runner \"$HOME/.cargo/bin/cargo-xwin\" --target x86_64-pc-windows-msvc --no-bundle --ci",
+    "tauri:build:windows:arm64": "RUSTFLAGS='-C target-feature=+crt-static' tauri build --runner \"$HOME/.cargo/bin/cargo-xwin\" --target aarch64-pc-windows-msvc --no-bundle --ci"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0"

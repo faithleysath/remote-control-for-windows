@@ -211,9 +211,12 @@ jobs:
         run: npm ci
       - name: Build host GUI
         working-directory: crates/rcw-host-gui
-        env:
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target ${{ matrix.target }} --no-bundle --ci
+        run: |
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            npm run tauri:build:windows:x64
+          else
+            npm run tauri:build:windows:arm64
+          fi
       - name: Package host GUI
         run: |
           set -euo pipefail

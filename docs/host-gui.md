@@ -23,6 +23,14 @@ npm ci
 npm run tauri:dev
 ```
 
+Windows release exe 从 Linux 构建时使用 package script 固化的 Tauri + cargo-xwin 命令：
+
+```bash
+cd crates/rcw-host-gui
+npm run tauri:build:windows:x64
+npm run tauri:build:windows:arm64
+```
+
 GUI 复用 `rcw-host-core` 的配置解析：
 
 - `RCW_SERVER_URL` 或编译期 `RCW_EMBED_SERVER_URL` 提供中继服务器地址。
