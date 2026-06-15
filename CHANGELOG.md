@@ -4,13 +4,14 @@
 
 ## 未发布
 
-- 抽出 `rcw-host-core` 运行时，让控制台 host 和 GUI host 共享连接循环、命令执行、上传下载、隧道、平台 API、单实例锁和审计逻辑。
-- 新增 `HostSnapshot` / `HostEvent` 状态模型，记录 listener、TOTP、session、auth、command、transfer、tunnel、错误和最近事件历史，供 CLI/GUI/audit 共用。
-- 暴露 host 生命周期控制 API，支持启动、停止、重启 listener、结束当前 session，并在服务端校验 host/session 归属后清理会话状态。
-- 升级 host 结构化审计和脱敏策略，覆盖 exec、输入、截图、窗口、上传下载、tunnel 和 session 事件；上传审计保留 controller 传入的 `audit_label`。
-- 新增 `rcw-host-gui` Tauri v2 工程，提供概览、会话、审计和设置页 MVP，支持复制连接信息、启动/停止/重连 listener、结束会话、保存 GUI 设置、查看/过滤运行期事件时间线和显示 audit 文件位置。
-- 修复 MCP 本地 tunnel listener 清理，关闭 forward 时释放本地监听端口。
+- 推进 GUI Host 转型 epic 的 #12-#18：抽出 `rcw-host-core` 运行时，并保持控制台 `rcw-host` 入口兼容，让 CLI host 和 GUI host 共享连接循环、命令执行、上传下载、隧道、平台 API、单实例锁和审计逻辑。
+- 新增 `HostSnapshot` / `HostEvent` 状态模型和事件订阅入口，记录 listener、TOTP、session、auth、command、transfer、tunnel、错误和最近事件历史，供 CLI、GUI 和 audit 共用。
+- 暴露 host 生命周期控制 API，支持启动、停止、重启 listener、使用新配置重启、结束当前 session、取消任务和关闭 tunnel；新增 `host.session_close` / `host.session_close_result`，协议版本提升到 v6。
+- 升级 host 结构化审计和脱敏策略，覆盖 session、exec、input、screenshot、windows、upload/download 和 tunnel 事件；上传审计保留 controller 传入的 `audit_label`。
+- 新增 `rcw-host-gui` Tauri v2 工程和最小安全权限基线，只开放窄 Tauri command 与 `host-event` 事件通道，不启用 shell/fs 插件或任意文件系统 scope。
+- 实现 GUI 概览、会话、审计和设置页 MVP，支持复制连接信息、启动/停止/重连 listener、结束会话、保存 GUI 设置、查看/过滤运行期事件时间线、复制 audit path 和显示 audit 文件位置；独立 exec/transfer/tunnel 管理 tab、托盘和安装包仍在后续 #19-#24。
 - CI 安装 Tauri Linux 依赖并检查 GUI 前端构建；发布 workflow 增加 `rcw-host-gui` Windows x86-64/arm64 artifact，GUI Windows 构建命令固化为 package script。
+- 修复 MCP 本地 tunnel listener 清理，关闭 forward 时释放本地监听端口。
 
 ## 0.1.8 - 2026-06-15
 
