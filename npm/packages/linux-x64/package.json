@@ -1,6 +1,6 @@
 {
   "name": "rcwctl-linux-x64",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Prebuilt rcwctl binary for Linux x64",
   "license": "MIT",
   "repository": {

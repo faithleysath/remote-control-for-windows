@@ -4,6 +4,7 @@ mod connection;
 mod identity;
 mod output;
 mod platform;
+mod tunnel;
 mod upload;
 
 use std::{path::PathBuf, sync::Arc};

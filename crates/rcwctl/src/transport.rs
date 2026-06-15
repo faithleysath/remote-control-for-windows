@@ -35,8 +35,10 @@ use crate::{
     session::SessionStore,
 };
 
-type WsStream = futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
-type WsSink = futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+pub(crate) type WsStream =
+    futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+pub(crate) type WsSink =
+    futures_util::stream::SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
 #[derive(Debug, Default)]
 pub(crate) struct CommandResponse {
@@ -635,7 +637,7 @@ async fn send_file_binary_chunks(
     Ok(())
 }
 
-async fn connect_control(server: &str) -> Result<(WsSink, WsStream)> {
+pub(crate) async fn connect_control(server: &str) -> Result<(WsSink, WsStream)> {
     let url = config::ws_endpoint_url(server, "/ws/control")?;
     let (ws, _) = connect_async(url)
         .await
@@ -643,13 +645,13 @@ async fn connect_control(server: &str) -> Result<(WsSink, WsStream)> {
     Ok(ws.split())
 }
 
-async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
+pub(crate) async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
     sink.send(Message::Text(serde_json::to_string(&message)?))
         .await?;
     Ok(())
 }
 
-async fn close_control(sink: &mut WsSink) {
+pub(crate) async fn close_control(sink: &mut WsSink) {
     let _ = sink.send(Message::Close(None)).await;
     let _ = sink.close().await;
 }
@@ -670,7 +672,10 @@ async fn next_message_during_upload_send(stream: &mut WsStream) -> Result<Incomi
     }
 }
 
-async fn next_message(stream: &mut WsStream, wait: Option<Duration>) -> Result<IncomingFrame> {
+pub(crate) async fn next_message(
+    stream: &mut WsStream,
+    wait: Option<Duration>,
+) -> Result<IncomingFrame> {
     loop {
         let frame = match wait {
             Some(wait) => timeout(wait, stream.next())
@@ -726,7 +731,7 @@ fn command_response(messages: Vec<IncomingFrame>) -> Result<CommandResponse> {
                     BinaryKind::DownloadChunk | BinaryKind::ScreenshotChunk => {
                         response.file.extend_from_slice(&frame.payload);
                     }
-                    BinaryKind::UploadChunk => {}
+                    BinaryKind::UploadChunk | BinaryKind::TunnelData => {}
                 }
             }
         }

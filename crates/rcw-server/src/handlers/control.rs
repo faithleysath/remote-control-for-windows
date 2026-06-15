@@ -1,5 +1,6 @@
 use crate::{
     audit,
+    state::CreateTunnel,
     state::{CreateExecJob, HostLookup, PendingOpen},
     ws::{
         log_websocket_read_error, outbound_channel, send_binary, send_error, send_text,
@@ -22,13 +23,18 @@ use rcw_common::{
         CommandCancelPayload, CommandCancelResultPayload, CommandRequestPayload,
         CommandStatusPayload, ControlOpenPayload, ErrorCode, HostAuthRequestPayload,
         HostSessionClosedPayload, SessionClosePayload, SessionCloseResultPayload,
-        SessionStatusPayload, SessionStatusResultPayload, WireMessage, PROTOCOL_VERSION,
-        TYPE_COMMAND_CANCEL, TYPE_COMMAND_CANCEL_RESULT, TYPE_COMMAND_REQUEST, TYPE_COMMAND_START,
-        TYPE_COMMAND_START_RESULT, TYPE_COMMAND_STATUS, TYPE_COMMAND_STATUS_RESULT,
-        TYPE_CONTROL_OPEN, TYPE_HOST_AUTH_REQUEST, TYPE_HOST_SESSION_CLOSED, TYPE_SESSION_CLOSE,
-        TYPE_SESSION_CLOSE_RESULT, TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT,
+        SessionStatusPayload, SessionStatusResultPayload, TunnelClosePayload,
+        TunnelCloseResultPayload, TunnelOpenPayload, TunnelStatusPayload,
+        TunnelStatusResultPayload, TunnelStreamControlPayload, TunnelStreamOpenPayload,
+        WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_CANCEL, TYPE_COMMAND_CANCEL_RESULT,
+        TYPE_COMMAND_REQUEST, TYPE_COMMAND_START, TYPE_COMMAND_START_RESULT, TYPE_COMMAND_STATUS,
+        TYPE_COMMAND_STATUS_RESULT, TYPE_CONTROL_OPEN, TYPE_HOST_AUTH_REQUEST,
+        TYPE_HOST_SESSION_CLOSED, TYPE_SESSION_CLOSE, TYPE_SESSION_CLOSE_RESULT,
+        TYPE_SESSION_STATUS, TYPE_SESSION_STATUS_RESULT, TYPE_TUNNEL_CLOSE,
+        TYPE_TUNNEL_CLOSE_RESULT, TYPE_TUNNEL_OPEN, TYPE_TUNNEL_STATUS, TYPE_TUNNEL_STATUS_RESULT,
+        TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN, TYPE_TUNNEL_STREAM_RESET,
     },
-    transfer::BinaryFrame,
+    transfer::{BinaryFrame, BinaryKind, TunnelDataFrame},
 };
 
 pub(crate) async fn control_ws(
@@ -78,6 +84,15 @@ async fn handle_control_message(state: &AppState, tx: &Tx, message: WireMessage)
         TYPE_COMMAND_START => handle_command_start(state, tx, message).await,
         TYPE_COMMAND_STATUS => handle_command_status(state, tx, message).await,
         TYPE_COMMAND_CANCEL => handle_command_cancel(state, tx, message).await,
+        TYPE_TUNNEL_OPEN => handle_tunnel_open(state, tx, message).await,
+        TYPE_TUNNEL_STATUS => handle_tunnel_status(state, tx, message).await,
+        TYPE_TUNNEL_CLOSE => handle_tunnel_close(state, tx, message).await,
+        TYPE_TUNNEL_STREAM_OPEN => handle_tunnel_stream_open(state, tx, message).await,
+        rcw_common::protocol::TYPE_TUNNEL_STREAM_OPEN_RESULT => {
+            handle_tunnel_stream_open_result(state, tx, message).await
+        }
+        TYPE_TUNNEL_STREAM_EOF => handle_tunnel_stream_eof(state, tx, message).await,
+        TYPE_TUNNEL_STREAM_RESET => handle_tunnel_stream_reset(state, tx, message).await,
         other => send_error(
             tx,
             message.request_id,
@@ -222,6 +237,10 @@ async fn handle_command_status(state: &AppState, tx: &Tx, message: WireMessage) 
 }
 
 async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
+    if bytes.first().copied() == Some(BinaryKind::TunnelData as u8) {
+        handle_control_tunnel_data(state, tx, bytes).await;
+        return;
+    }
     let frame = match BinaryFrame::decode(&bytes) {
         Ok(frame) => frame,
         Err(err) => {
@@ -283,6 +302,501 @@ async fn handle_control_binary(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
         return;
     };
     send_binary(&host_tx, bytes);
+}
+
+async fn handle_control_tunnel_data(state: &AppState, tx: &Tx, bytes: Vec<u8>) {
+    let frame = match TunnelDataFrame::decode(&bytes) {
+        Ok(frame) => frame,
+        Err(err) => {
+            send_error(
+                tx,
+                None,
+                None,
+                ErrorCode::InternalError,
+                &format!("invalid tunnel data frame: {err}"),
+            );
+            return;
+        }
+    };
+    let Some(route) = state
+        .inner
+        .record_tunnel_bytes(
+            &frame.tunnel_id,
+            &frame.stream_id,
+            rcw_common::protocol::TunnelEndpointSide::Controller,
+            frame.payload.len(),
+        )
+        .await
+    else {
+        send_error(
+            tx,
+            None,
+            None,
+            ErrorCode::SessionExpired,
+            "tunnel data has no active stream route",
+        );
+        return;
+    };
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&route.host_id, &route.connection_id)
+        .await
+    else {
+        send_error(
+            tx,
+            None,
+            Some(route.session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+    send_binary(&host_tx, bytes);
+}
+
+async fn handle_tunnel_open(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let Some(request_id_value) = request_id.clone() else {
+        send_error(
+            tx,
+            None,
+            message.session_id.clone(),
+            ErrorCode::InternalError,
+            "tunnel.open requires request_id",
+        );
+        return;
+    };
+    let Some(session_id) = message.session_id.clone() else {
+        send_error(
+            tx,
+            request_id,
+            None,
+            ErrorCode::SessionExpired,
+            "missing session_id",
+        );
+        return;
+    };
+    let payload = match message.payload_as::<TunnelOpenPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                Some(session_id),
+                ErrorCode::InternalError,
+                &format!("invalid tunnel.open payload: {err}"),
+            );
+            return;
+        }
+    };
+    if let Err(err) = validate_tunnel_open_payload(&payload) {
+        send_error(tx, request_id, Some(session_id), err.code, &err.message);
+        return;
+    }
+    let Some(session) = state
+        .inner
+        .bind_controller_to_session(&session_id, &payload.session_token, tx.clone())
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        );
+        return;
+    };
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&session.host_id, &session.connection_id)
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            Some(session.session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+    let tunnel_id = rcw_common::ids::new_tunnel_id();
+    let created = state
+        .inner
+        .create_tunnel(CreateTunnel {
+            tunnel_id: tunnel_id.clone(),
+            session: session.clone(),
+            direction: payload.direction,
+            listen_addr: payload.listen_addr.clone(),
+            listen_port: payload.listen_port,
+            target_host: payload.target_host.clone(),
+            target_port: payload.target_port,
+            idle_timeout_ms: payload.idle_timeout_ms,
+        })
+        .await;
+    let Err(err) = created else {
+        let mut forward = message;
+        forward.payload = serde_json::json!(TunnelOpenPayload {
+            session_token: String::new(),
+            tunnel_id: Some(tunnel_id.clone()),
+            direction: payload.direction,
+            listen_addr: payload.listen_addr,
+            listen_port: payload.listen_port,
+            target_host: payload.target_host,
+            target_port: payload.target_port,
+            idle_timeout_ms: payload.idle_timeout_ms,
+            allow_non_loopback_listen: payload.allow_non_loopback_listen,
+            allow_non_loopback_target: payload.allow_non_loopback_target,
+        });
+        forward.request_id = Some(request_id_value.clone());
+        forward.session_id = Some(session.session_id.clone());
+        if !send_text(&host_tx, forward) {
+            let _ = state
+                .inner
+                .fail_tunnel(&tunnel_id, ErrorCode::HostDisconnected.message())
+                .await;
+            send_error(
+                tx,
+                Some(request_id_value),
+                Some(session.session_id),
+                ErrorCode::HostDisconnected,
+                ErrorCode::HostDisconnected.message(),
+            );
+        }
+        return;
+    };
+    send_error(
+        tx,
+        request_id,
+        Some(session.session_id),
+        err.code,
+        &err.message,
+    );
+}
+
+async fn handle_tunnel_status(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let Some(session_id) = message.session_id.clone() else {
+        send_error(
+            tx,
+            request_id,
+            None,
+            ErrorCode::SessionExpired,
+            "missing session_id",
+        );
+        return;
+    };
+    let payload = match message.payload_as::<TunnelStatusPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                Some(session_id),
+                ErrorCode::InternalError,
+                &format!("invalid tunnel.status payload: {err}"),
+            );
+            return;
+        }
+    };
+    let Some(tunnels) = state
+        .inner
+        .tunnels_for_session_if_valid(
+            &session_id,
+            &payload.session_token,
+            payload.tunnel_id.as_deref(),
+        )
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        );
+        return;
+    };
+    let result = WireMessage::new(
+        TYPE_TUNNEL_STATUS_RESULT,
+        request_id,
+        Some(session_id),
+        TunnelStatusResultPayload { ok: true, tunnels },
+    )
+    .expect("tunnel status result serializes");
+    send_text(tx, result);
+}
+
+async fn handle_tunnel_close(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let Some(session_id) = message.session_id.clone() else {
+        send_error(
+            tx,
+            request_id,
+            None,
+            ErrorCode::SessionExpired,
+            "missing session_id",
+        );
+        return;
+    };
+    let payload = match message.payload_as::<TunnelClosePayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                Some(session_id),
+                ErrorCode::InternalError,
+                &format!("invalid tunnel.close payload: {err}"),
+            );
+            return;
+        }
+    };
+    let Some(tunnel) = state
+        .inner
+        .tunnel_if_valid(&payload.tunnel_id, &payload.session_token)
+        .await
+    else {
+        send_error(
+            tx,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            "tunnel is not active",
+        );
+        return;
+    };
+    let closed = state
+        .inner
+        .close_tunnel_if_valid(
+            &payload.tunnel_id,
+            &payload.session_token,
+            "controller_close",
+        )
+        .await
+        .expect("tunnel existed before close");
+    if let Some(host_tx) = state
+        .inner
+        .host_tx(&tunnel.host_id, &tunnel.connection_id)
+        .await
+    {
+        send_text(&host_tx, message.clone());
+    }
+    let result = WireMessage::new(
+        TYPE_TUNNEL_CLOSE_RESULT,
+        request_id,
+        Some(session_id),
+        TunnelCloseResultPayload {
+            ok: true,
+            tunnel: closed,
+        },
+    )
+    .expect("tunnel close result serializes");
+    send_text(tx, result);
+}
+
+async fn handle_tunnel_stream_open(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<TunnelStreamOpenPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                message.session_id.clone(),
+                ErrorCode::InternalError,
+                &format!("invalid tunnel.stream_open payload: {err}"),
+            );
+            return;
+        }
+    };
+    let route = match state
+        .inner
+        .add_tunnel_stream(
+            &payload.tunnel_id,
+            payload.stream_id.clone(),
+            rcw_common::protocol::TunnelEndpointSide::Controller,
+        )
+        .await
+    {
+        Ok(route) => route,
+        Err(err) => {
+            send_error(tx, request_id, message.session_id, err.code, &err.message);
+            return;
+        }
+    };
+    let Some(host_tx) = state
+        .inner
+        .host_tx(&route.host_id, &route.connection_id)
+        .await
+    else {
+        let _ = state
+            .inner
+            .close_tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await;
+        send_error(
+            tx,
+            request_id,
+            Some(route.session_id),
+            ErrorCode::HostDisconnected,
+            ErrorCode::HostDisconnected.message(),
+        );
+        return;
+    };
+    send_text(&host_tx, message);
+}
+
+async fn handle_tunnel_stream_eof(state: &AppState, tx: &Tx, message: WireMessage) {
+    relay_tunnel_stream_control(
+        state,
+        tx,
+        message,
+        TYPE_TUNNEL_STREAM_EOF,
+        false,
+        rcw_common::protocol::TunnelEndpointSide::Controller,
+    )
+    .await;
+}
+
+async fn handle_tunnel_stream_open_result(state: &AppState, tx: &Tx, message: WireMessage) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<rcw_common::protocol::TunnelStreamOpenResultPayload>()
+    {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                message.session_id.clone(),
+                ErrorCode::InternalError,
+                &format!("invalid tunnel.stream_open_result payload: {err}"),
+            );
+            return;
+        }
+    };
+    let route = if payload.ok {
+        state
+            .inner
+            .tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    } else {
+        state
+            .inner
+            .close_tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    };
+    let Some(route) = route else {
+        return;
+    };
+    if let Some(host_tx) = state
+        .inner
+        .host_tx(&route.host_id, &route.connection_id)
+        .await
+    {
+        send_text(&host_tx, message);
+    }
+}
+
+async fn handle_tunnel_stream_reset(state: &AppState, tx: &Tx, message: WireMessage) {
+    relay_tunnel_stream_control(
+        state,
+        tx,
+        message,
+        TYPE_TUNNEL_STREAM_RESET,
+        true,
+        rcw_common::protocol::TunnelEndpointSide::Controller,
+    )
+    .await;
+}
+
+async fn relay_tunnel_stream_control(
+    state: &AppState,
+    tx: &Tx,
+    message: WireMessage,
+    expected_kind: &str,
+    remove_stream: bool,
+    from_side: rcw_common::protocol::TunnelEndpointSide,
+) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<TunnelStreamControlPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error(
+                tx,
+                request_id,
+                message.session_id.clone(),
+                ErrorCode::InternalError,
+                &format!("invalid {expected_kind} payload: {err}"),
+            );
+            return;
+        }
+    };
+    let route = if remove_stream {
+        state
+            .inner
+            .close_tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    } else {
+        state
+            .inner
+            .mark_tunnel_stream_eof(&payload.tunnel_id, &payload.stream_id, from_side)
+            .await
+            .map(|(route, _)| route)
+    };
+    let Some(route) = route else {
+        return;
+    };
+    if let Some(host_tx) = state
+        .inner
+        .host_tx(&route.host_id, &route.connection_id)
+        .await
+    {
+        send_text(&host_tx, message);
+    }
+}
+
+fn validate_tunnel_open_payload(
+    payload: &TunnelOpenPayload,
+) -> Result<(), rcw_common::protocol::ErrorPayload> {
+    if payload.listen_addr.trim().is_empty() || payload.target_host.trim().is_empty() {
+        return Err(rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::InvalidPath,
+            message: "tunnel listen and target addresses are required".to_owned(),
+        });
+    }
+    if payload.listen_port == 0 {
+        return Err(rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::InvalidPath,
+            message: "tunnel listen_port must be non-zero".to_owned(),
+        });
+    }
+    if payload.target_port == 0 {
+        return Err(rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::InvalidPath,
+            message: "tunnel target_port must be non-zero".to_owned(),
+        });
+    }
+    if !payload.allow_non_loopback_listen && !is_loopback_name(&payload.listen_addr) {
+        return Err(rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::PermissionDenied,
+            message: "tunnel listen address must be loopback unless explicitly allowed".to_owned(),
+        });
+    }
+    if !payload.allow_non_loopback_target && !is_loopback_name(&payload.target_host) {
+        return Err(rcw_common::protocol::ErrorPayload {
+            code: ErrorCode::PermissionDenied,
+            message: "tunnel target host must be loopback unless explicitly allowed".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_loopback_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case("localhost")
+        || value == "127.0.0.1"
+        || value == "::1"
+        || value.starts_with("127.")
 }
 
 async fn handle_control_open(state: &AppState, tx: &Tx, message: WireMessage) {

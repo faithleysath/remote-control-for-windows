@@ -4,6 +4,15 @@
 
 ## 未发布
 
+## 0.1.8 - 2026-06-15
+
+- 升级 wire protocol 到 v5，新增 `tunnel.open` / `tunnel.status` / `tunnel.close` 和 `tunnel.stream_*` 控制消息，以及独立 `TunnelData` binary frame。
+- 新增 `rcwctl forward` 常驻命令，支持重复声明 `-L listen=target` 正向转发和 `-R listen=target` 反向转发。
+- 新增 MCP `tunnel_open`、`tunnel_status`、`tunnel_close` 工具，MCP 进程内持有 listener、stream pump 和 tunnel manager 状态。
+- 服务端增加 tunnel/session/stream 路由表、loopback 默认安全校验、并发上限、空闲清理和关闭传播。
+- host 和 controller 两端增加 TCP listener/connect、stream pump、EOF/reset 传播和字节计数。
+- 在本地 Linux smoke 中验证正向 `-L` 与反向 `-R` TCP echo tunnel；本轮尚未刷新真实 Windows host E2E。
+
 ## 0.1.7 - 2026-06-14
 
 - Windows host 启动早期设置 per-monitor DPI awareness，修复 125% 缩放环境下 screenshot 使用逻辑尺寸导致右侧和底部被裁剪的问题。

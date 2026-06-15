@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use rcw_common::protocol::TunnelDirection;
 use rcw_common::protocol::{DEFAULT_MOUSE_BUTTON, DEFAULT_SCREENSHOT_FORMAT};
 
 use crate::defaults::{
@@ -110,6 +111,44 @@ pub(super) struct ExecCancelParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct TunnelOpenParams {
+    #[schemars(
+        description = "Tunnel direction: local means controller listen, remote means host listen."
+    )]
+    pub(super) direction: TunnelDirection,
+    #[schemars(description = "Listen address on the side that owns the listener.")]
+    pub(super) listen_addr: String,
+    #[schemars(description = "Listen port on the side that owns the listener.")]
+    pub(super) listen_port: u16,
+    #[schemars(description = "Target host reached from the opposite side.")]
+    pub(super) target_host: String,
+    #[schemars(description = "Target port reached from the opposite side.")]
+    pub(super) target_port: u16,
+    #[serde(default = "default_tunnel_idle_timeout_ms")]
+    #[schemars(description = "Idle timeout in milliseconds.")]
+    pub(super) idle_timeout_ms: u64,
+    #[serde(default)]
+    #[schemars(description = "Allow listening on non-loopback addresses.")]
+    pub(super) allow_non_loopback_listen: bool,
+    #[serde(default)]
+    #[schemars(description = "Allow targeting non-loopback hosts.")]
+    pub(super) allow_non_loopback_target: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct TunnelStatusParams {
+    #[serde(default)]
+    #[schemars(description = "Optional tunnel ID to query.")]
+    pub(super) tunnel_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct TunnelCloseParams {
+    #[schemars(description = "Tunnel ID returned by tunnel_open.")]
+    pub(super) tunnel_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(super) struct ScreenshotFileParams {
     #[schemars(description = "Local path writable by this MCP server process.")]
     pub(super) output_path: String,
@@ -171,6 +210,10 @@ fn default_mcp_exec_wait_ms() -> u64 {
 
 fn default_exec_timeout_ms() -> Option<u64> {
     Some(DEFAULT_EXEC_TIMEOUT_MS)
+}
+
+fn default_tunnel_idle_timeout_ms() -> u64 {
+    rcw_common::protocol::DEFAULT_TUNNEL_IDLE_TIMEOUT_MS
 }
 
 fn default_screenshot_format() -> String {

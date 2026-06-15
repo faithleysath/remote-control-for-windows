@@ -148,6 +148,14 @@ remote-control-for-windows/
 3. 服务端根据内存中的会话表和在线主机表返回 session/host 状态。
 4. 该请求不转发给被控端。
 
+### TCP 隧道
+
+1. 控制端发送 `tunnel.open`，声明 `local` 或 `remote` 方向、listen 地址和 target 地址。
+2. 服务端验证 session token、loopback/allowlist 边界和 per-session 限额，创建 session 下的 tunnel registry 项。
+3. `local` 方向由 controller 本地 listen，accept 后发送 `tunnel.stream_open`，host 连接 target；`remote` 方向由 host 本地 listen，accept 后发送 `tunnel.stream_open`，controller 连接 target。
+4. 每条 TCP accept/connect 形成独立 `stream_id`。流量使用 `TunnelData` binary frame 按 `tunnel_id + stream_id` 路由；EOF/reset 用 JSON 控制消息表达。
+5. `tunnel.close`、session close、host disconnect、MCP/CLI 退出或 idle timeout 都会回收 tunnel 和 stream 状态。
+
 ## 关键状态
 
 服务端内存状态：
@@ -157,6 +165,8 @@ remote-control-for-windows/
 - 会话表：`session_id -> host_id, machine_id, connection_id, controller, created_at, last_seen`。
 - 待处理请求表：`request_id -> session_id, host_id, connection_id, response_channel`。
 - server-owned exec job 表：`task_id -> host_id, connection_id, session_id, status/stdout/stderr/complete/error`。
+- tunnel 表：`tunnel_id -> session_id, host_id, connection_id, direction, listen, target, status, counters, idle timeout`。
+- tunnel stream 表：`stream_id -> tunnel_id, session_id, source_side, target_side, EOF/reset state`。
 - 审计写入器：按结构化日志记录事件，不参与会话状态恢复。
 
 被控端状态：
@@ -166,6 +176,7 @@ remote-control-for-windows/
 - 当前 TOTP seed。
 - 当前 session。
 - 正在执行的请求。
+- active tunnel listener 和 stream pump。
 - 当前权限状态：普通用户或管理员权限。
 - 最近一次剪贴板复制状态。
 - 电源请求状态：是否成功阻止系统休眠和显示器熄屏。
@@ -179,6 +190,7 @@ remote-control-for-windows/
 - machine ID。
 - 创建时间和最近使用时间。
 - 本地审计日志路径。
+- active tunnel listener、stream pump 和 MCP tunnel task 句柄。
 
 ## 并发模型
 
@@ -187,6 +199,7 @@ remote-control-for-windows/
 - 同一 session 内允许多个命令并发发起和执行；服务端和被控端都按 `request_id` 路由结果。
 - 长命令 `exec` 和 `download` 在 host 侧异步执行，发送输出或 binary chunk 时只短暂持有 WebSocket sink 锁，避免把同 session 的其他 request 串行化。
 - upload/download 仍依赖控制端进程持续读写本地文件；MCP 的后台 transfer 只在当前 MCP 进程存活期间有效。
+- TCP tunnel 由打开它的 CLI/MCP 进程持有本地 listener 和 stream pump；server 只保存短期 registry 并做 WebSocket 中继。
 - 输入类命令当前不做全局串行锁；如果后续需要多人协作或复杂 GUI 操作，再单独设计输入 FIFO/lease。
 
 ## 失败处理
@@ -195,6 +208,7 @@ remote-control-for-windows/
 - 控制端断开：session 可以短时间保留，便于 CLI 多子命令复用；后台清理器会回收长期空闲 session、过期 pending open、过期请求路由和空的限流 key。
 - exec 后台任务：`command.start` 创建 server-owned exec job；host 负责执行进程，server 保留有限 stdout/stderr、完成状态和错误，短 CLI 或 MCP 都可后续查询或取消。
 - 文件传输任务：upload/download 是 client-attached stream；没有控制端 daemon 或 server staging 时，CLI 退出后无法继续读取本地源文件或写入本地目标文件。MCP 只能在本 MCP 进程存活期间后台传输。
+- TCP tunnel：CLI `forward` 收到 Ctrl-C 时会发送 `tunnel.close` 并关闭本地 listener；MCP `tunnel_close` 和 MCP shutdown 会关闭对应 manager。异常退出时依赖 server session/tunnel idle cleanup 和 host/controller WebSocket 断开回收。
 - MCP 正常退出：控制端尽力发送 `session.close`；崩溃或强杀时依赖 force reconnect 或服务端空闲清理兜底。
 - 被控端 Ctrl-C 退出：host 尽力发送 WebSocket close，服务端观察到断开后清理 host 和相关 session。
 - 服务端重启：所有主机和 session 失效，需要重新连接和认证。

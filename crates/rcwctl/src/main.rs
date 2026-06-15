@@ -9,6 +9,7 @@ mod mcp;
 mod output;
 mod session;
 mod transport;
+mod tunnel;
 
 use std::time::Instant;
 
@@ -18,8 +19,8 @@ use rcw_common::{
     ids::new_request_id,
     protocol::{
         KeyboardKeyArgs, KeyboardTypeArgs, MouseClickArgs, MouseMoveArgs, MouseScrollArgs,
-        COMMAND_KEYBOARD_KEY, COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK, COMMAND_MOUSE_MOVE,
-        COMMAND_MOUSE_SCROLL,
+        TunnelDirection, COMMAND_KEYBOARD_KEY, COMMAND_KEYBOARD_TYPE, COMMAND_MOUSE_CLICK,
+        COMMAND_MOUSE_MOVE, COMMAND_MOUSE_SCROLL,
     },
 };
 use serde_json::json;
@@ -35,6 +36,7 @@ use crate::{
     mcp::run_mcp_server,
     session::FileSessionStore,
     transport::OpenSessionRequest,
+    tunnel::{forward_cli, parse_forward_spec},
 };
 
 #[tokio::main]
@@ -100,6 +102,22 @@ async fn run() -> Result<i32> {
         }
         Commands::ExecStatus { task_id } => exec_status(&cli, &request_id, task_id).await,
         Commands::ExecCancel { task_id } => exec_cancel(&cli, &request_id, task_id).await,
+        Commands::Forward { local, remote } => {
+            let mut specs = Vec::new();
+            for value in local {
+                specs.push(parse_forward_spec(value, TunnelDirection::Local)?);
+            }
+            for value in remote {
+                specs.push(parse_forward_spec(value, TunnelDirection::Remote)?);
+            }
+            forward_cli(
+                &ControllerConfig::from_cli(&cli),
+                &FileSessionStore::new(&cli),
+                specs,
+                cli.json,
+            )
+            .await
+        }
         Commands::Upload {
             local,
             remote,

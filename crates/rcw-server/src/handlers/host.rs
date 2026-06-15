@@ -12,13 +12,16 @@ use rcw_common::{
     protocol::{
         CommandCompletePayload, CommandOutputPayload, ControlOpenResultPayload, ErrorCode,
         ErrorPayload, HostAuthResultPayload, HostHelloAckPayload, HostHelloPayload,
-        HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage, PROTOCOL_VERSION,
-        TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT,
-        TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO,
-        TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
-        TYPE_UPLOAD_COMPLETE,
+        HostSessionClosedPayload, HostSessionOpenedPayload, TunnelCloseResultPayload,
+        TunnelOpenResultPayload, TunnelStreamControlPayload, TunnelStreamOpenPayload,
+        TunnelStreamOpenResultPayload, WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE,
+        TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR,
+        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED,
+        TYPE_HOST_SESSION_OPENED, TYPE_TUNNEL_CLOSE_RESULT, TYPE_TUNNEL_OPEN_RESULT,
+        TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN, TYPE_TUNNEL_STREAM_OPEN_RESULT,
+        TYPE_TUNNEL_STREAM_RESET, TYPE_UPLOAD_COMPLETE,
     },
-    transfer::BinaryFrame,
+    transfer::{BinaryFrame, BinaryKind, TunnelDataFrame},
 };
 use tracing::{debug, info, warn};
 
@@ -243,6 +246,40 @@ async fn handle_host_message(
         | TYPE_UPLOAD_COMPLETE
         | TYPE_DOWNLOAD_COMPLETE
         | TYPE_ERROR => relay_host_response(state, host_id, connection_id, message).await,
+        TYPE_TUNNEL_OPEN_RESULT => {
+            handle_tunnel_open_result(state, host_id, connection_id, message).await
+        }
+        TYPE_TUNNEL_CLOSE_RESULT => {
+            handle_tunnel_close_result(state, host_id, connection_id, message).await
+        }
+        TYPE_TUNNEL_STREAM_OPEN => {
+            handle_host_tunnel_stream_open(state, host_id, connection_id, message).await
+        }
+        TYPE_TUNNEL_STREAM_OPEN_RESULT => {
+            handle_host_tunnel_stream_open_result(state, host_id, connection_id, message).await
+        }
+        TYPE_TUNNEL_STREAM_EOF => {
+            handle_host_tunnel_stream_control(
+                state,
+                host_id,
+                connection_id,
+                message,
+                TYPE_TUNNEL_STREAM_EOF,
+                false,
+            )
+            .await
+        }
+        TYPE_TUNNEL_STREAM_RESET => {
+            handle_host_tunnel_stream_control(
+                state,
+                host_id,
+                connection_id,
+                message,
+                TYPE_TUNNEL_STREAM_RESET,
+                true,
+            )
+            .await
+        }
         other => debug!("ignored host message type {other} from {host_id}"),
     }
 }
@@ -516,6 +553,10 @@ async fn relay_host_binary_response(
     connection_id: &str,
     bytes: Vec<u8>,
 ) {
+    if bytes.first().copied() == Some(BinaryKind::TunnelData as u8) {
+        relay_host_tunnel_data(state, host_id, connection_id, bytes).await;
+        return;
+    }
     let frame = match BinaryFrame::decode(&bytes) {
         Ok(frame) => frame,
         Err(err) => {
@@ -553,6 +594,280 @@ async fn relay_host_binary_response(
     if let Some(tx) = controller_tx {
         send_binary(&tx, bytes);
     };
+}
+
+async fn handle_tunnel_open_result(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
+    let request_id = message.request_id.clone();
+    let result = match message.payload_as::<TunnelOpenResultPayload>() {
+        Ok(result) => result,
+        Err(err) => {
+            warn!("invalid tunnel.open_result from host {host_id}: {err}");
+            return;
+        }
+    };
+    let tunnel_id = result.tunnel.tunnel_id.clone();
+    let tunnel = if result.ok {
+        state
+            .inner
+            .activate_tunnel(
+                &tunnel_id,
+                Some(result.tunnel.listen_addr.clone()),
+                Some(result.tunnel.listen_port),
+            )
+            .await
+    } else {
+        state
+            .inner
+            .fail_tunnel(
+                &tunnel_id,
+                result
+                    .tunnel
+                    .close_reason
+                    .as_deref()
+                    .unwrap_or("host rejected tunnel"),
+            )
+            .await
+    };
+    let Some(tunnel) = tunnel else {
+        warn!("tunnel.open_result for unknown tunnel {tunnel_id} from {host_id}");
+        return;
+    };
+    if tunnel.session_id != result.tunnel.session_id {
+        warn!("tunnel.open_result session mismatch for tunnel {tunnel_id}");
+        return;
+    }
+    let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&tunnel.session_id, host_id, connection_id)
+        .await
+    else {
+        return;
+    };
+    let response = WireMessage::new(
+        TYPE_TUNNEL_OPEN_RESULT,
+        request_id,
+        Some(tunnel.session_id.clone()),
+        TunnelOpenResultPayload {
+            ok: result.ok,
+            tunnel,
+        },
+    )
+    .expect("tunnel open result serializes");
+    send_text(&controller_tx, response);
+}
+
+async fn handle_tunnel_close_result(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
+    let result = match message.payload_as::<TunnelCloseResultPayload>() {
+        Ok(result) => result,
+        Err(err) => {
+            warn!("invalid tunnel.close_result from host {host_id}: {err}");
+            return;
+        }
+    };
+    if let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&result.tunnel.session_id, host_id, connection_id)
+        .await
+    {
+        send_text(&controller_tx, message);
+    }
+}
+
+async fn handle_host_tunnel_stream_open(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<TunnelStreamOpenPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            warn!("invalid tunnel.stream_open from host {host_id}: {err}");
+            return;
+        }
+    };
+    let route = match state
+        .inner
+        .add_tunnel_stream(
+            &payload.tunnel_id,
+            payload.stream_id.clone(),
+            rcw_common::protocol::TunnelEndpointSide::Host,
+        )
+        .await
+    {
+        Ok(route) => route,
+        Err(err) => {
+            if let Some(controller_tx) = state
+                .inner
+                .session_controller_for_machine(
+                    message.session_id.as_deref().unwrap_or_default(),
+                    host_id,
+                    connection_id,
+                )
+                .await
+            {
+                send_error(
+                    &controller_tx,
+                    request_id,
+                    message.session_id,
+                    err.code,
+                    &err.message,
+                );
+            }
+            return;
+        }
+    };
+    if route.host_id != host_id || route.connection_id != connection_id {
+        return;
+    }
+    if let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&route.session_id, host_id, connection_id)
+        .await
+    {
+        send_text(&controller_tx, message);
+    }
+}
+
+async fn handle_host_tunnel_stream_open_result(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
+    let payload = match message.payload_as::<TunnelStreamOpenResultPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            warn!("invalid tunnel.stream_open_result from host {host_id}: {err}");
+            return;
+        }
+    };
+    let route = if payload.ok {
+        state
+            .inner
+            .tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    } else {
+        state
+            .inner
+            .close_tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    };
+    let Some(route) = route else {
+        return;
+    };
+    if route.host_id != host_id || route.connection_id != connection_id {
+        return;
+    }
+    if let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&route.session_id, host_id, connection_id)
+        .await
+    {
+        send_text(&controller_tx, message);
+    }
+}
+
+async fn handle_host_tunnel_stream_control(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+    expected_kind: &str,
+    remove_stream: bool,
+) {
+    let payload = match message.payload_as::<TunnelStreamControlPayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            warn!("invalid {expected_kind} from host {host_id}: {err}");
+            return;
+        }
+    };
+    let route = if remove_stream {
+        state
+            .inner
+            .close_tunnel_stream(&payload.tunnel_id, &payload.stream_id)
+            .await
+    } else {
+        state
+            .inner
+            .mark_tunnel_stream_eof(
+                &payload.tunnel_id,
+                &payload.stream_id,
+                rcw_common::protocol::TunnelEndpointSide::Host,
+            )
+            .await
+            .map(|(route, _)| route)
+    };
+    let Some(route) = route else {
+        return;
+    };
+    if route.host_id != host_id || route.connection_id != connection_id {
+        return;
+    }
+    if let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&route.session_id, host_id, connection_id)
+        .await
+    {
+        send_text(&controller_tx, message);
+    }
+}
+
+async fn relay_host_tunnel_data(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    bytes: Vec<u8>,
+) {
+    let frame = match TunnelDataFrame::decode(&bytes) {
+        Ok(frame) => frame,
+        Err(err) => {
+            warn!("invalid tunnel data frame from host {host_id}: {err}");
+            return;
+        }
+    };
+    let Some(route) = state
+        .inner
+        .record_tunnel_bytes(
+            &frame.tunnel_id,
+            &frame.stream_id,
+            rcw_common::protocol::TunnelEndpointSide::Host,
+            frame.payload.len(),
+        )
+        .await
+    else {
+        warn!(
+            "host tunnel data for unknown stream {} tunnel {}",
+            frame.stream_id, frame.tunnel_id
+        );
+        return;
+    };
+    if route.host_id != host_id || route.connection_id != connection_id {
+        warn!(
+            "host tunnel data route mismatch stream {} tunnel {}",
+            frame.stream_id, frame.tunnel_id
+        );
+        return;
+    }
+    if let Some(controller_tx) = state
+        .inner
+        .session_controller_for_machine(&route.session_id, host_id, connection_id)
+        .await
+    {
+        send_binary(&controller_tx, bytes);
+    }
 }
 
 async fn unregister_host(state: &AppState, host_id: &str, connection_id: &str, machine_id: &str) {

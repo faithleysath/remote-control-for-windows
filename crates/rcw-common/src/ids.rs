@@ -13,6 +13,14 @@ pub fn new_session_id() -> String {
     Ulid::new().to_string()
 }
 
+pub fn new_tunnel_id() -> String {
+    Ulid::new().to_string()
+}
+
+pub fn new_stream_id() -> String {
+    Ulid::new().to_string()
+}
+
 pub fn new_session_token() -> String {
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);

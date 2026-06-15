@@ -5,7 +5,7 @@ use std::{
 
 use rcw_common::protocol::{
     CommandCompletePayload, CommandStatusResultPayload, CommandTaskStatus, ErrorCode, ErrorPayload,
-    MAX_CAPTURED_OUTPUT_BYTES,
+    TunnelDirection, TunnelEndpointSide, TunnelInfo, TunnelStatus, MAX_CAPTURED_OUTPUT_BYTES,
 };
 use tokio::sync::Mutex;
 
@@ -16,6 +16,9 @@ pub(crate) const PENDING_OPEN_TTL: Duration = Duration::from_secs(60);
 pub(crate) const REQUEST_ROUTE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const COMMAND_JOB_TTL: Duration = Duration::from_secs(30 * 60);
 pub(crate) const RATE_LIMIT_KEY_TTL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const TUNNEL_IDLE_SWEEP_GRACE: Duration = Duration::from_secs(5);
+const MAX_TUNNELS_PER_SESSION: usize = 16;
+const MAX_STREAMS_PER_TUNNEL: usize = 64;
 
 pub(crate) struct ServerState {
     hosts: Mutex<HashMap<String, HostConn>>,
@@ -24,6 +27,8 @@ pub(crate) struct ServerState {
     pending_open: Mutex<HashMap<String, PendingOpen>>,
     request_routes: Mutex<HashMap<String, RequestRoute>>,
     command_jobs: Mutex<HashMap<String, CommandJob>>,
+    tunnels: Mutex<HashMap<String, TunnelState>>,
+    tunnel_streams: Mutex<HashMap<String, TunnelStreamRoute>>,
     host_registrations: Mutex<HashMap<String, VecDeque<Instant>>>,
     auth_attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
@@ -79,6 +84,37 @@ pub(crate) struct CommandJob {
     finished_at: Option<Instant>,
 }
 
+#[derive(Clone)]
+pub(crate) struct TunnelState {
+    pub(crate) info: TunnelInfo,
+    pub(crate) host_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) target_side: TunnelEndpointSide,
+    pub(crate) last_activity: Instant,
+}
+
+#[derive(Clone)]
+pub(crate) struct TunnelStreamRoute {
+    pub(crate) tunnel_id: String,
+    pub(crate) session_id: String,
+    pub(crate) host_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) last_activity: Instant,
+    pub(crate) controller_eof: bool,
+    pub(crate) host_eof: bool,
+}
+
+pub(crate) struct CreateTunnel {
+    pub(crate) tunnel_id: String,
+    pub(crate) session: SessionState,
+    pub(crate) direction: TunnelDirection,
+    pub(crate) listen_addr: String,
+    pub(crate) listen_port: u16,
+    pub(crate) target_host: String,
+    pub(crate) target_port: u16,
+    pub(crate) idle_timeout_ms: u64,
+}
+
 pub(crate) struct CreateExecJob {
     pub(crate) task_id: String,
     pub(crate) host_id: String,
@@ -97,6 +133,8 @@ impl ServerState {
             pending_open: Mutex::new(HashMap::new()),
             request_routes: Mutex::new(HashMap::new()),
             command_jobs: Mutex::new(HashMap::new()),
+            tunnels: Mutex::new(HashMap::new()),
+            tunnel_streams: Mutex::new(HashMap::new()),
             host_registrations: Mutex::new(HashMap::new()),
             auth_attempts: Mutex::new(HashMap::new()),
         }
@@ -277,6 +315,8 @@ impl ServerState {
         if let Some(session) = &removed {
             let session_ids = HashSet::from([session.session_id.clone()]);
             self.remove_routes_for_sessions(&session_ids).await;
+            self.remove_tunnels_for_sessions(&session_ids, "session_closed")
+                .await;
             self.fail_running_exec_jobs_for_sessions(
                 &session_ids,
                 ErrorPayload {
@@ -476,6 +516,8 @@ impl ServerState {
             .collect::<HashSet<_>>();
         if !removed_session_ids.is_empty() {
             self.remove_routes_for_sessions(&removed_session_ids).await;
+            self.remove_tunnels_for_sessions(&removed_session_ids, "host_disconnected")
+                .await;
             self.fail_running_exec_jobs_for_sessions(&removed_session_ids, error)
                 .await;
         }
@@ -527,6 +569,8 @@ impl ServerState {
             .map(|session| session.session_id.clone())
             .collect::<HashSet<_>>();
         if !removed_session_ids.is_empty() {
+            self.remove_tunnels_for_sessions(&removed_session_ids, "session_idle_timeout")
+                .await;
             self.fail_running_exec_jobs_for_sessions(
                 &removed_session_ids,
                 ErrorPayload {
@@ -549,6 +593,25 @@ impl ServerState {
                 now.duration_since(route.created_at) <= REQUEST_ROUTE_TTL
                     && !removed_session_ids.contains(&route.session_id)
             });
+        }
+
+        {
+            let idle_tunnel_ids = {
+                let tunnels = self.tunnels.lock().await;
+                tunnels
+                    .values()
+                    .filter(|tunnel| {
+                        let idle_timeout = Duration::from_millis(tunnel.info.idle_timeout_ms)
+                            .saturating_add(TUNNEL_IDLE_SWEEP_GRACE);
+                        now.duration_since(tunnel.last_activity) > idle_timeout
+                    })
+                    .map(|tunnel| tunnel.info.tunnel_id.clone())
+                    .collect::<Vec<_>>()
+            };
+            if !idle_tunnel_ids.is_empty() {
+                self.close_tunnels_by_ids(&idle_tunnel_ids, "idle_timeout")
+                    .await;
+            }
         }
 
         {
@@ -694,6 +757,325 @@ impl ServerState {
     async fn remove_routes_for_sessions(&self, session_ids: &HashSet<String>) {
         let mut routes = self.request_routes.lock().await;
         routes.retain(|_, route| !session_ids.contains(&route.session_id));
+    }
+
+    pub(crate) async fn create_tunnel(
+        &self,
+        create: CreateTunnel,
+    ) -> Result<TunnelInfo, ErrorPayload> {
+        let session_tunnel_count = {
+            let tunnels = self.tunnels.lock().await;
+            tunnels
+                .values()
+                .filter(|tunnel| tunnel.info.session_id == create.session.session_id)
+                .count()
+        };
+        if session_tunnel_count >= MAX_TUNNELS_PER_SESSION {
+            return Err(ErrorPayload {
+                code: ErrorCode::PermissionDenied,
+                message: "per-session tunnel limit exceeded".to_owned(),
+            });
+        }
+
+        let now = Instant::now();
+        let now_text = rcw_common::audit::now_rfc3339();
+        let info = TunnelInfo {
+            tunnel_id: create.tunnel_id.clone(),
+            session_id: create.session.session_id.clone(),
+            direction: create.direction,
+            listen_addr: create.listen_addr,
+            listen_port: create.listen_port,
+            target_host: create.target_host,
+            target_port: create.target_port,
+            status: TunnelStatus::Opening,
+            opened_at: now_text.clone(),
+            last_activity_at: now_text,
+            idle_timeout_ms: create.idle_timeout_ms,
+            bytes_from_listener: 0,
+            bytes_from_target: 0,
+            active_streams: 0,
+            total_streams: 0,
+            close_reason: None,
+        };
+        let state = TunnelState {
+            info: info.clone(),
+            host_id: create.session.host_id,
+            connection_id: create.session.connection_id,
+            target_side: create.direction.target_endpoint_side(),
+            last_activity: now,
+        };
+        let mut tunnels = self.tunnels.lock().await;
+        tunnels.insert(create.tunnel_id, state);
+        Ok(info)
+    }
+
+    pub(crate) async fn activate_tunnel(
+        &self,
+        tunnel_id: &str,
+        listen_addr: Option<String>,
+        listen_port: Option<u16>,
+    ) -> Option<TunnelInfo> {
+        let mut tunnels = self.tunnels.lock().await;
+        let tunnel = tunnels.get_mut(tunnel_id)?;
+        if let Some(listen_addr) = listen_addr {
+            tunnel.info.listen_addr = listen_addr;
+        }
+        if let Some(listen_port) = listen_port {
+            tunnel.info.listen_port = listen_port;
+        }
+        tunnel.info.status = TunnelStatus::Active;
+        tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+        tunnel.last_activity = Instant::now();
+        Some(tunnel.info.clone())
+    }
+
+    pub(crate) async fn fail_tunnel(&self, tunnel_id: &str, reason: &str) -> Option<TunnelInfo> {
+        let mut tunnels = self.tunnels.lock().await;
+        let mut tunnel = tunnels.remove(tunnel_id)?;
+        tunnel.info.status = TunnelStatus::Failed;
+        tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+        tunnel.info.close_reason = Some(reason.to_owned());
+        drop(tunnels);
+        let mut streams = self.tunnel_streams.lock().await;
+        streams.retain(|_, route| route.tunnel_id != tunnel_id);
+        Some(tunnel.info)
+    }
+
+    pub(crate) async fn tunnel_if_valid(
+        &self,
+        tunnel_id: &str,
+        session_token: &str,
+    ) -> Option<TunnelState> {
+        let session_id = {
+            let tunnels = self.tunnels.lock().await;
+            tunnels
+                .get(tunnel_id)
+                .map(|tunnel| tunnel.info.session_id.clone())?
+        };
+        self.session_if_valid(&session_id, session_token).await?;
+        let tunnels = self.tunnels.lock().await;
+        tunnels.get(tunnel_id).cloned()
+    }
+
+    pub(crate) async fn tunnels_for_session_if_valid(
+        &self,
+        session_id: &str,
+        session_token: &str,
+        tunnel_id: Option<&str>,
+    ) -> Option<Vec<TunnelInfo>> {
+        self.session_if_valid(session_id, session_token).await?;
+        let tunnels = self.tunnels.lock().await;
+        let list = tunnels
+            .values()
+            .filter(|tunnel| tunnel.info.session_id == session_id)
+            .filter(|tunnel| {
+                tunnel_id
+                    .map(|tunnel_id| tunnel.info.tunnel_id == tunnel_id)
+                    .unwrap_or(true)
+            })
+            .map(|tunnel| tunnel.info.clone())
+            .collect();
+        Some(list)
+    }
+
+    pub(crate) async fn close_tunnel_if_valid(
+        &self,
+        tunnel_id: &str,
+        session_token: &str,
+        reason: &str,
+    ) -> Option<TunnelInfo> {
+        let tunnel = self.tunnel_if_valid(tunnel_id, session_token).await?;
+        self.close_tunnels_by_ids(std::slice::from_ref(&tunnel.info.tunnel_id), reason)
+            .await
+            .into_iter()
+            .next()
+    }
+
+    pub(crate) async fn add_tunnel_stream(
+        &self,
+        tunnel_id: &str,
+        stream_id: String,
+        source_side: TunnelEndpointSide,
+    ) -> Result<TunnelStreamRoute, ErrorPayload> {
+        let now = Instant::now();
+        let mut tunnels = self.tunnels.lock().await;
+        let Some(tunnel) = tunnels.get_mut(tunnel_id) else {
+            return Err(ErrorPayload {
+                code: ErrorCode::SessionExpired,
+                message: "tunnel is not active".to_owned(),
+            });
+        };
+        if tunnel.info.status != TunnelStatus::Active {
+            return Err(ErrorPayload {
+                code: ErrorCode::SessionExpired,
+                message: "tunnel is not active".to_owned(),
+            });
+        }
+        if tunnel.info.active_streams >= MAX_STREAMS_PER_TUNNEL {
+            return Err(ErrorPayload {
+                code: ErrorCode::PermissionDenied,
+                message: "per-tunnel stream limit exceeded".to_owned(),
+            });
+        }
+        if source_side == tunnel.target_side {
+            return Err(ErrorPayload {
+                code: ErrorCode::PermissionDenied,
+                message: "tunnel stream opened from invalid side".to_owned(),
+            });
+        }
+        tunnel.info.active_streams += 1;
+        tunnel.info.total_streams += 1;
+        tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+        tunnel.last_activity = now;
+        let route = TunnelStreamRoute {
+            tunnel_id: tunnel.info.tunnel_id.clone(),
+            session_id: tunnel.info.session_id.clone(),
+            host_id: tunnel.host_id.clone(),
+            connection_id: tunnel.connection_id.clone(),
+            last_activity: now,
+            controller_eof: false,
+            host_eof: false,
+        };
+        drop(tunnels);
+
+        let mut streams = self.tunnel_streams.lock().await;
+        streams.insert(stream_id, route.clone());
+        Ok(route)
+    }
+
+    pub(crate) async fn tunnel_stream(
+        &self,
+        tunnel_id: &str,
+        stream_id: &str,
+    ) -> Option<TunnelStreamRoute> {
+        let streams = self.tunnel_streams.lock().await;
+        streams
+            .get(stream_id)
+            .filter(|route| route.tunnel_id == tunnel_id)
+            .cloned()
+    }
+
+    pub(crate) async fn close_tunnel_stream(
+        &self,
+        tunnel_id: &str,
+        stream_id: &str,
+    ) -> Option<TunnelStreamRoute> {
+        let removed = {
+            let mut streams = self.tunnel_streams.lock().await;
+            match streams.get(stream_id) {
+                Some(route) if route.tunnel_id == tunnel_id => streams.remove(stream_id),
+                _ => None,
+            }
+        };
+        if let Some(route) = &removed {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(tunnel) = tunnels.get_mut(tunnel_id) {
+                tunnel.info.active_streams = tunnel.info.active_streams.saturating_sub(1);
+                tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+                tunnel.last_activity = Instant::now();
+            }
+            self.touch_session(&route.session_id).await;
+        }
+        removed
+    }
+
+    pub(crate) async fn mark_tunnel_stream_eof(
+        &self,
+        tunnel_id: &str,
+        stream_id: &str,
+        side: TunnelEndpointSide,
+    ) -> Option<(TunnelStreamRoute, bool)> {
+        let (route, remove) = {
+            let mut streams = self.tunnel_streams.lock().await;
+            let route = streams
+                .get_mut(stream_id)
+                .filter(|route| route.tunnel_id == tunnel_id)?;
+            match side {
+                TunnelEndpointSide::Controller => route.controller_eof = true,
+                TunnelEndpointSide::Host => route.host_eof = true,
+            }
+            route.last_activity = Instant::now();
+            (route.clone(), route.controller_eof && route.host_eof)
+        };
+        if remove {
+            self.close_tunnel_stream(tunnel_id, stream_id).await;
+        } else {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(tunnel) = tunnels.get_mut(tunnel_id) {
+                tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+                tunnel.last_activity = Instant::now();
+            }
+        }
+        Some((route, remove))
+    }
+
+    pub(crate) async fn record_tunnel_bytes(
+        &self,
+        tunnel_id: &str,
+        stream_id: &str,
+        from_side: TunnelEndpointSide,
+        bytes: usize,
+    ) -> Option<TunnelStreamRoute> {
+        let now = Instant::now();
+        let route = {
+            let mut streams = self.tunnel_streams.lock().await;
+            let route = streams
+                .get_mut(stream_id)
+                .filter(|route| route.tunnel_id == tunnel_id)?;
+            route.last_activity = now;
+            route.clone()
+        };
+        {
+            let mut tunnels = self.tunnels.lock().await;
+            if let Some(tunnel) = tunnels.get_mut(tunnel_id) {
+                if from_side == tunnel.info.direction.local_endpoint_side() {
+                    tunnel.info.bytes_from_listener =
+                        tunnel.info.bytes_from_listener.saturating_add(bytes as u64);
+                } else {
+                    tunnel.info.bytes_from_target =
+                        tunnel.info.bytes_from_target.saturating_add(bytes as u64);
+                }
+                tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+                tunnel.last_activity = now;
+            }
+        }
+        self.touch_session(&route.session_id).await;
+        Some(route)
+    }
+
+    async fn remove_tunnels_for_sessions(&self, session_ids: &HashSet<String>, reason: &str) {
+        let tunnel_ids = {
+            let tunnels = self.tunnels.lock().await;
+            tunnels
+                .values()
+                .filter(|tunnel| session_ids.contains(&tunnel.info.session_id))
+                .map(|tunnel| tunnel.info.tunnel_id.clone())
+                .collect::<Vec<_>>()
+        };
+        if !tunnel_ids.is_empty() {
+            self.close_tunnels_by_ids(&tunnel_ids, reason).await;
+        }
+    }
+
+    async fn close_tunnels_by_ids(&self, tunnel_ids: &[String], reason: &str) -> Vec<TunnelInfo> {
+        let tunnel_id_set = tunnel_ids.iter().cloned().collect::<HashSet<_>>();
+        {
+            let mut streams = self.tunnel_streams.lock().await;
+            streams.retain(|_, route| !tunnel_id_set.contains(&route.tunnel_id));
+        }
+        let mut tunnels = self.tunnels.lock().await;
+        tunnel_ids
+            .iter()
+            .filter_map(|tunnel_id| {
+                tunnels.remove(tunnel_id).map(|mut tunnel| {
+                    tunnel.info.status = TunnelStatus::Closed;
+                    tunnel.info.active_streams = 0;
+                    tunnel.info.last_activity_at = rcw_common::audit::now_rfc3339();
+                    tunnel.info.close_reason = Some(reason.to_owned());
+                    tunnel.info
+                })
+            })
+            .collect()
     }
 
     async fn fail_running_exec_jobs_for_sessions(

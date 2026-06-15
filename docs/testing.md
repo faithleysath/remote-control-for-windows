@@ -4,6 +4,8 @@
 
 ## 当前验证记录
 
+2026-06-15，`0.1.8` 在本地 Linux 组合环境中完成协议 v5 TCP tunnel smoke。覆盖 `rcwctl forward -L 127.0.0.1:19002=127.0.0.1:19001` 正向 TCP echo 和 `rcwctl forward -R 127.0.0.1:19012=127.0.0.1:19011` 反向 TCP echo；本轮尚未刷新真实 Windows host GUI 环境 E2E。
+
 2026-06-14，`0.1.7` 在 `win11-data` 1920x1080 / 125% 缩放环境下完成 host 侧修复验证。覆盖 screenshot 物理全尺寸输出、`Control+End` 导航键和 MCP 鼠标坐标靶场一致性；server/control 协议保持 v4 不变。详细记录见 [v0.1.7 E2E 修复验证报告](e2e-v0.1.7.md)。
 
 2026-06-14，`0.1.6` 在 `win11-data` Windows-in-Docker VM 和 zhang `rcw-server` 上完成协议 v4 实机 E2E。覆盖 host identity/routing、运行期 `host_id`、host 单实例锁、CLI/MCP `--host-id` 精确连接、`HostBusy`、force reconnect、同 session 并发 exec、server-owned 后台 exec 查询/取消、MCP upload/download 后台任务和 transfer cancel、截图、窗口枚举、鼠标键盘、电源请求和剪贴板安全边界。详细记录见 [v0.1.6 E2E 测试报告](e2e-v0.1.6.md)。

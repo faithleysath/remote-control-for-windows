@@ -92,6 +92,20 @@ pub(crate) enum Commands {
         #[arg(help = "Task ID returned by exec.")]
         task_id: String,
     },
+    Forward {
+        #[arg(
+            short = 'L',
+            value_name = "LISTEN=TARGET",
+            help = "Local forward: controller listens, host connects target. May be repeated."
+        )]
+        local: Vec<String>,
+        #[arg(
+            short = 'R',
+            value_name = "LISTEN=TARGET",
+            help = "Remote forward: host listens, controller connects target. May be repeated."
+        )]
+        remote: Vec<String>,
+    },
     Upload {
         #[arg(help = "Local file path to read and upload.")]
         local: PathBuf,
@@ -188,6 +202,7 @@ pub(crate) fn command_name(command: &Commands) -> &'static str {
         Commands::Exec { .. } => "exec",
         Commands::ExecStatus { .. } => "exec.status",
         Commands::ExecCancel { .. } => "exec.cancel",
+        Commands::Forward { .. } => "forward",
         Commands::Upload { .. } => "upload",
         Commands::Download { .. } => "download",
         Commands::Screenshot { .. } => "screenshot",
@@ -257,6 +272,26 @@ mod tests {
                 assert_eq!(command, vec!["cmd.exe"]);
             }
             _ => panic!("expected exec command"),
+        }
+    }
+
+    #[test]
+    fn parses_repeated_forward_specs() {
+        let cli = Cli::try_parse_from([
+            "rcwctl",
+            "forward",
+            "-L",
+            "127.0.0.1:15432=127.0.0.1:5432",
+            "-R",
+            "127.0.0.1:18080=127.0.0.1:8080",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Forward { local, remote } => {
+                assert_eq!(local.len(), 1);
+                assert_eq!(remote.len(), 1);
+            }
+            _ => panic!("expected forward command"),
         }
     }
 

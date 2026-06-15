@@ -12,6 +12,7 @@ use crate::{RcwError, RcwResult};
 
 pub const CHUNK_SIZE: usize = 64 * 1024;
 pub const BINARY_FRAME_HEADER_LEN: usize = 1 + 16 + 4 + 4 + 4;
+pub const TUNNEL_DATA_FRAME_HEADER_LEN: usize = 1 + 16 + 16 + 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -19,6 +20,7 @@ pub enum BinaryKind {
     UploadChunk = 1,
     DownloadChunk = 2,
     ScreenshotChunk = 3,
+    TunnelData = 4,
 }
 
 impl TryFrom<u8> for BinaryKind {
@@ -29,6 +31,7 @@ impl TryFrom<u8> for BinaryKind {
             1 => Ok(Self::UploadChunk),
             2 => Ok(Self::DownloadChunk),
             3 => Ok(Self::ScreenshotChunk),
+            4 => Ok(Self::TunnelData),
             other => Err(RcwError::Protocol(format!(
                 "unsupported binary frame kind: {other}"
             ))),
@@ -67,6 +70,11 @@ impl BinaryFrame {
             return Err(RcwError::Protocol("binary frame is too short".to_owned()));
         }
         let kind = BinaryKind::try_from(bytes[0])?;
+        if kind == BinaryKind::TunnelData {
+            return Err(RcwError::Protocol(
+                "tunnel data frame must be decoded as TunnelDataFrame".to_owned(),
+            ));
+        }
         let mut request_id = [0_u8; 16];
         request_id.copy_from_slice(&bytes[1..17]);
         let request_id = Ulid::from_bytes(request_id).to_string();
@@ -88,6 +96,68 @@ impl BinaryFrame {
             request_id,
             sequence,
             total_sequences,
+            payload: bytes[payload_start..payload_end].to_vec(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TunnelDataFrame {
+    pub tunnel_id: String,
+    pub stream_id: String,
+    pub payload: Vec<u8>,
+}
+
+impl TunnelDataFrame {
+    pub fn encode(&self) -> RcwResult<Vec<u8>> {
+        let tunnel_id = Ulid::from_string(&self.tunnel_id)
+            .map_err(|err| RcwError::Protocol(format!("tunnel_id is not a ULID: {err}")))?;
+        let stream_id = Ulid::from_string(&self.stream_id)
+            .map_err(|err| RcwError::Protocol(format!("stream_id is not a ULID: {err}")))?;
+        let payload_len = u32::try_from(self.payload.len()).map_err(|_| {
+            RcwError::Protocol("tunnel data payload is too large for u32 length".to_owned())
+        })?;
+        let mut bytes = Vec::with_capacity(TUNNEL_DATA_FRAME_HEADER_LEN + self.payload.len());
+        bytes.push(BinaryKind::TunnelData as u8);
+        bytes.extend_from_slice(&tunnel_id.to_bytes());
+        bytes.extend_from_slice(&stream_id.to_bytes());
+        bytes.extend_from_slice(&payload_len.to_be_bytes());
+        bytes.extend_from_slice(&self.payload);
+        Ok(bytes)
+    }
+
+    pub fn decode(bytes: &[u8]) -> RcwResult<Self> {
+        if bytes.len() < TUNNEL_DATA_FRAME_HEADER_LEN {
+            return Err(RcwError::Protocol(
+                "tunnel data frame is too short".to_owned(),
+            ));
+        }
+        let kind = BinaryKind::try_from(bytes[0])?;
+        if kind != BinaryKind::TunnelData {
+            return Err(RcwError::Protocol(format!(
+                "expected tunnel data frame, got {kind:?}"
+            )));
+        }
+        let mut tunnel_id = [0_u8; 16];
+        tunnel_id.copy_from_slice(&bytes[1..17]);
+        let tunnel_id = Ulid::from_bytes(tunnel_id).to_string();
+        let mut stream_id = [0_u8; 16];
+        stream_id.copy_from_slice(&bytes[17..33]);
+        let stream_id = Ulid::from_bytes(stream_id).to_string();
+        let payload_len = read_u32_be(bytes, 33, "payload_len")? as usize;
+        let payload_start = TUNNEL_DATA_FRAME_HEADER_LEN;
+        let payload_end = payload_start
+            .checked_add(payload_len)
+            .ok_or_else(|| RcwError::Protocol("tunnel data payload length overflow".to_owned()))?;
+        if bytes.len() != payload_end {
+            return Err(RcwError::Protocol(format!(
+                "tunnel data payload length mismatch: header={payload_len}, actual={}",
+                bytes.len().saturating_sub(payload_start)
+            )));
+        }
+        Ok(Self {
+            tunnel_id,
+            stream_id,
             payload: bytes[payload_start..payload_end].to_vec(),
         })
     }
@@ -333,6 +403,11 @@ pub fn commit_temp_output_file(temp_path: &Path, path: &Path, overwrite: bool) -
 }
 
 pub fn chunk_binary(request_id: &str, kind: BinaryKind, bytes: &[u8]) -> RcwResult<Vec<Vec<u8>>> {
+    if kind == BinaryKind::TunnelData {
+        return Err(RcwError::Protocol(
+            "tunnel data cannot use file chunk framing".to_owned(),
+        ));
+    }
     let total_sequences = total_sequences_for_len(bytes.len() as u64)?;
     let mut frames = Vec::new();
     if bytes.is_empty() {
@@ -413,6 +488,33 @@ mod tests {
         let err = BinaryFrame::decode(&encoded).unwrap_err();
 
         assert!(err.to_string().contains("unsupported binary frame kind"));
+    }
+
+    #[test]
+    fn tunnel_data_frame_round_trips_separately_from_file_chunks() {
+        let tunnel_id = Ulid::new().to_string();
+        let stream_id = Ulid::new().to_string();
+        let frame = TunnelDataFrame {
+            tunnel_id: tunnel_id.clone(),
+            stream_id: stream_id.clone(),
+            payload: b"hello".to_vec(),
+        };
+
+        let encoded = frame.encode().unwrap();
+        let decoded = TunnelDataFrame::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.tunnel_id, tunnel_id);
+        assert_eq!(decoded.stream_id, stream_id);
+        assert_eq!(decoded.payload, b"hello");
+        assert!(BinaryFrame::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn file_chunking_rejects_tunnel_data_kind() {
+        let err = chunk_binary(REQUEST_ID, BinaryKind::TunnelData, b"hello").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("tunnel data cannot use file chunk"));
     }
 
     #[test]

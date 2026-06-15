@@ -156,6 +156,24 @@ rcwctl upload ./tool.exe 'C:\Users\Public\tool.exe'
 rcwctl download 'C:\ProgramData\App\logs\app.log' ./app.log
 ```
 
+## forward
+
+打开 TCP 端口转发 tunnel。该命令是常驻命令，按 Ctrl-C 会关闭本进程打开的 tunnel。
+
+```bash
+rcwctl forward \
+  -L 127.0.0.1:15432=127.0.0.1:5432 \
+  -R 127.0.0.1:18080=127.0.0.1:8080
+```
+
+语义：
+
+- `-L listen=target`：controller 本机监听 `listen`，每个 TCP 连接通过 WebSocket tunnel 让 host 连接 `target`。
+- `-R listen=target`：host 监听 `listen`，每个 TCP 连接通过 WebSocket tunnel 让 controller 连接 `target`。
+- `-L` 和 `-R` 都可以重复声明。
+- 默认只允许 loopback listen 和 loopback target。需要暴露非 loopback 地址时必须在后续专门开 allowlist/显式放开参数。
+- server 不暴露裸 TCP 入口；所有流量都走现有 `/ws/control` 和 `/ws/host`。
+
 ## screenshot
 
 截取当前屏幕。
@@ -264,12 +282,15 @@ MCP 工具：
 - `download`：下载远端文件并流式写入 MCP 服务器本机路径。可传 `wait_ms`，等待窗口结束后返回 MCP 进程内 `task_id`。
 - `transfer_status`：查询 MCP 进程内上传或下载任务的运行状态、最终结果或错误。
 - `transfer_cancel`：取消 MCP 进程内上传或下载任务；上传如果还在 MCP 本机 hash/校验阶段会直接本地取消，已经发到远端后会先等待 server 确认取消消息已投递，再中止本地任务并通知 host 丢弃临时上传状态；下载会通知 host 停止远端分块发送，同时中止本地写入并清理本地临时文件。
+- `tunnel_open`：打开 TCP tunnel，并在当前 MCP 进程内持有 listener/stream pump；返回 `tunnel_id`。
+- `tunnel_status`：查询当前 session 的 tunnel 列表或指定 `tunnel_id`。
+- `tunnel_close`：关闭指定 `tunnel_id`，并释放当前 MCP 进程内的 tunnel manager。
 - `screenshot`：截图并写入 MCP 服务器本机路径。
 - `windows`：列出窗口。
 - `mouse_move`、`mouse_click`、`mouse_scroll`：鼠标操作。
 - `keyboard_type`、`keyboard_key`：键盘输入。
 
-`mcp` 是长期运行进程。它把打开后的 session 和传输任务状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。`exec` 默认远端运行上限为 24 小时，默认最多等待 90 秒；如果未完成，会返回 server-owned `task_id`，之后调用 `exec_status` 查询。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 MCP 进程内 `task_id`，之后调用 `transfer_status` 查询。`wait_ms=0` 表示立即返回任务状态。exec job 可以被后续 CLI 或 MCP 查询；upload/download 依赖当前 MCP 进程继续读写本地文件，不支持无 daemon 的 CLI detached transfer，也不在 MCP 进程退出后保留。已发到远端的取消请求只有在 server 返回 `command.cancel_result` 后，控制端才确认取消已投递；exec 最终状态由 host 的后续回包决定，transfer 的本地进程内状态在确认投递后由 MCP 进程本地标记为 cancelled。如果 server 未确认已发到远端的 transfer 取消或返回 `error`，MCP 会返回错误，并且不会进入本地 abort/清理分支；还没发到远端的本地预处理阶段可以直接本地取消。MCP 进程正常退出时会尽力关闭当前 session；如果进程崩溃或被强杀，内存中的 session 信息和传输任务状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
+`mcp` 是长期运行进程。它把打开后的 session、传输任务和 tunnel manager 状态保存在本进程内存里，不读取也不写入普通 CLI 使用的本地 session 文件；因此不会污染 `~/.local/share/rcwctl/session.json`、`~/Library/Application Support/rcwctl/session.json` 或 `%APPDATA%\rcwctl\session.json`。MCP 文件工具只接收路径参数，文件主体使用 WebSocket binary frame 流式传输，不使用 base64 参数。TCP tunnel 流量使用独立 `TunnelData` binary frame，不复用 upload/download file chunk。`exec` 默认远端运行上限为 24 小时，默认最多等待 90 秒；如果未完成，会返回 server-owned `task_id`，之后调用 `exec_status` 查询。`upload` / `download` 默认最多等待 60 秒；如果传输未完成，会返回 MCP 进程内 `task_id`，之后调用 `transfer_status` 查询。`wait_ms=0` 表示立即返回任务状态。exec job 可以被后续 CLI 或 MCP 查询；upload/download 和 tunnel 都依赖当前 MCP 进程继续读写本地文件或 TCP socket，不在 MCP 进程退出后保留。已发到远端的取消请求只有在 server 返回 `command.cancel_result` 后，控制端才确认取消已投递；exec 最终状态由 host 的后续回包决定，transfer 的本地进程内状态在确认投递后由 MCP 进程本地标记为 cancelled。如果 server 未确认已发到远端的 transfer 取消或返回 `error`，MCP 会返回错误，并且不会进入本地 abort/清理分支；还没发到远端的本地预处理阶段可以直接本地取消。MCP 进程正常退出时会尽力关闭当前 session 和已打开 tunnel；如果进程崩溃或被强杀，内存中的 session、传输任务和 tunnel 状态会丢失，后续需要重新调用 `connect`，必要时使用 `force_reconnect=true`。
 
 ## Codex 调用约定
 

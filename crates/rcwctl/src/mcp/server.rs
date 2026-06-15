@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -7,7 +8,8 @@ use std::{
 use super::types::{
     ClickParams, ConnectParams, DownloadFileParams, ExecCancelParams, ExecParams, ExecStatusParams,
     KeyParams, MoveParams, ScreenshotFileParams, ScrollParams, TransferCancelParams,
-    TransferStatusParams, TypeParams, UploadFileParams,
+    TransferStatusParams, TunnelCloseParams, TunnelOpenParams, TunnelStatusParams, TypeParams,
+    UploadFileParams,
 };
 use crate::jobs::{
     cancel_transfer_task, finish_transfer_snapshot, insert_transfer_task,
@@ -44,13 +46,20 @@ use crate::{
     output::write_output_file_checked,
     session::{MemorySessionStore, SessionFile, SessionStore},
     transport::{ControlClient, OpenSessionRequest},
+    tunnel::{TunnelCloseResult, TunnelManager, TunnelOpenResult, TunnelSpec, TunnelStatusResult},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct RcwMcpServer {
     config: ControllerConfig,
     session: Arc<std::sync::Mutex<Option<SessionFile>>>,
     transfers: TransferTasks,
+    tunnels: Arc<std::sync::Mutex<HashMap<String, McpTunnelRecord>>>,
+}
+
+#[derive(Clone)]
+struct McpTunnelRecord {
+    manager: TunnelManager,
 }
 
 #[tool_router(server_handler)]
@@ -60,6 +69,7 @@ impl RcwMcpServer {
             config,
             session: Arc::new(std::sync::Mutex::new(None)),
             transfers: new_transfer_tasks(),
+            tunnels: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -101,6 +111,7 @@ impl RcwMcpServer {
     async fn disconnect(&self) -> Result<Json<CloseResult>, String> {
         let request_id = new_request_id();
         let started = Instant::now();
+        self.close_tunnels_local().await;
         let result = close_session_state(&self.config, &self.store(), &request_id).await;
         self.audit(
             &request_id,
@@ -485,6 +496,112 @@ impl RcwMcpServer {
     }
 
     #[tool(
+        name = "tunnel_open",
+        description = "Open a TCP tunnel for the active session and keep it alive in this MCP process."
+    )]
+    async fn tunnel_open(
+        &self,
+        Parameters(params): Parameters<TunnelOpenParams>,
+    ) -> Result<Json<TunnelOpenResult>, String> {
+        let request_id = new_request_id();
+        let started = Instant::now();
+        let result = async {
+            let manager = TunnelManager::connect(&self.config, &self.store()).await?;
+            let result = manager
+                .open(
+                    &request_id,
+                    &self.config,
+                    &self.store(),
+                    TunnelSpec {
+                        direction: params.direction,
+                        listen_addr: params.listen_addr,
+                        listen_port: params.listen_port,
+                        target_host: params.target_host,
+                        target_port: params.target_port,
+                        idle_timeout_ms: params.idle_timeout_ms,
+                        allow_non_loopback_listen: params.allow_non_loopback_listen,
+                        allow_non_loopback_target: params.allow_non_loopback_target,
+                    },
+                )
+                .await?;
+            self.tunnels
+                .lock()
+                .map_err(|_| anyhow!("tunnel task lock poisoned"))?
+                .insert(result.tunnel.tunnel_id.clone(), McpTunnelRecord { manager });
+            Ok(result)
+        }
+        .await;
+        self.audit(
+            &request_id,
+            "mcp.tunnel_open",
+            &result,
+            started.elapsed(),
+            result
+                .as_ref()
+                .ok()
+                .map(|result| format!("tunnel_id={}", result.tunnel.tunnel_id)),
+        );
+        result.map(Json).map_err(format_error)
+    }
+
+    #[tool(
+        name = "tunnel_status",
+        description = "Get active TCP tunnel status for the current session."
+    )]
+    async fn tunnel_status(
+        &self,
+        Parameters(params): Parameters<TunnelStatusParams>,
+    ) -> Result<Json<TunnelStatusResult>, String> {
+        let request_id = new_request_id();
+        let started = Instant::now();
+        let result =
+            TunnelManager::status(&self.config, &self.store(), &request_id, params.tunnel_id).await;
+        self.audit(
+            &request_id,
+            "mcp.tunnel_status",
+            &result,
+            started.elapsed(),
+            None,
+        );
+        result.map(Json).map_err(format_error)
+    }
+
+    #[tool(
+        name = "tunnel_close",
+        description = "Close a TCP tunnel opened by tunnel_open."
+    )]
+    async fn tunnel_close(
+        &self,
+        Parameters(params): Parameters<TunnelCloseParams>,
+    ) -> Result<Json<TunnelCloseResult>, String> {
+        let request_id = new_request_id();
+        let started = Instant::now();
+        let record = self
+            .tunnels
+            .lock()
+            .map_err(|_| "tunnel task lock poisoned".to_owned())?
+            .remove(&params.tunnel_id);
+        let result = async {
+            let result =
+                TunnelManager::close(&self.config, &self.store(), &request_id, &params.tunnel_id)
+                    .await?;
+            if let Some(record) = record {
+                record.manager.shutdown().await;
+            }
+            Ok(result)
+        }
+        .await;
+        self.audit(
+            &request_id,
+            "mcp.tunnel_close",
+            &result,
+            started.elapsed(),
+            Some(format!("tunnel_id={}", params.tunnel_id)),
+        );
+        result.map(Json).map_err(format_error)
+    }
+
+    #[tool(
         name = "screenshot",
         description = "Capture a screenshot and write it to the MCP server filesystem."
     )]
@@ -696,6 +813,7 @@ async fn wait_for_server_exec_job(
 
 impl RcwMcpServer {
     async fn close_on_shutdown(&self) {
+        self.close_tunnels_local().await;
         let has_session = match self.session.lock() {
             Ok(session) => session.is_some(),
             Err(_) => {
@@ -724,6 +842,22 @@ impl RcwMcpServer {
                     "rcwctl mcp: failed to clear memory session during shutdown: {clear_err:#}"
                 );
             }
+        }
+    }
+
+    async fn close_tunnels_local(&self) {
+        let records = match self.tunnels.lock() {
+            Ok(mut tunnels) => tunnels
+                .drain()
+                .map(|(_, record)| record)
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                eprintln!("rcwctl mcp: tunnel task lock poisoned during shutdown");
+                Vec::new()
+            }
+        };
+        for record in records {
+            record.manager.shutdown().await;
         }
     }
 }

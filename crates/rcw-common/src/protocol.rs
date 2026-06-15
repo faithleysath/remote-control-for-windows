@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::RcwResult;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 pub const TYPE_HOST_HELLO: &str = "host.hello";
 pub const TYPE_HOST_HELLO_ACK: &str = "host.hello_ack";
@@ -29,6 +29,16 @@ pub const TYPE_COMMAND_CANCEL: &str = "command.cancel";
 pub const TYPE_COMMAND_CANCEL_RESULT: &str = "command.cancel_result";
 pub const TYPE_UPLOAD_COMPLETE: &str = "upload.complete";
 pub const TYPE_DOWNLOAD_COMPLETE: &str = "download.complete";
+pub const TYPE_TUNNEL_OPEN: &str = "tunnel.open";
+pub const TYPE_TUNNEL_OPEN_RESULT: &str = "tunnel.open_result";
+pub const TYPE_TUNNEL_STATUS: &str = "tunnel.status";
+pub const TYPE_TUNNEL_STATUS_RESULT: &str = "tunnel.status_result";
+pub const TYPE_TUNNEL_CLOSE: &str = "tunnel.close";
+pub const TYPE_TUNNEL_CLOSE_RESULT: &str = "tunnel.close_result";
+pub const TYPE_TUNNEL_STREAM_OPEN: &str = "tunnel.stream_open";
+pub const TYPE_TUNNEL_STREAM_OPEN_RESULT: &str = "tunnel.stream_open_result";
+pub const TYPE_TUNNEL_STREAM_EOF: &str = "tunnel.stream_eof";
+pub const TYPE_TUNNEL_STREAM_RESET: &str = "tunnel.stream_reset";
 pub const TYPE_ERROR: &str = "error";
 
 pub const COMMAND_EXEC: &str = "exec";
@@ -44,6 +54,7 @@ pub const COMMAND_KEYBOARD_KEY: &str = "keyboard.key";
 pub const DEFAULT_SCREENSHOT_FORMAT: &str = "png";
 pub const DEFAULT_MOUSE_BUTTON: &str = "left";
 pub const MAX_CAPTURED_OUTPUT_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_TUNNEL_IDLE_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
@@ -269,6 +280,157 @@ pub struct CommandCancelResultPayload {
     pub ok: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelDirection {
+    Local,
+    Remote,
+}
+
+impl TunnelDirection {
+    pub fn local_endpoint_side(self) -> TunnelEndpointSide {
+        match self {
+            TunnelDirection::Local => TunnelEndpointSide::Controller,
+            TunnelDirection::Remote => TunnelEndpointSide::Host,
+        }
+    }
+
+    pub fn target_endpoint_side(self) -> TunnelEndpointSide {
+        match self {
+            TunnelDirection::Local => TunnelEndpointSide::Host,
+            TunnelDirection::Remote => TunnelEndpointSide::Controller,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelEndpointSide {
+    Controller,
+    Host,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelStatus {
+    Opening,
+    Active,
+    Closing,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelStreamStatus {
+    Opening,
+    Active,
+    Closing,
+    Closed,
+    Reset,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelOpenPayload {
+    pub session_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_id: Option<String>,
+    pub direction: TunnelDirection,
+    pub listen_addr: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    #[serde(default = "default_tunnel_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
+    #[serde(default)]
+    pub allow_non_loopback_listen: bool,
+    #[serde(default)]
+    pub allow_non_loopback_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelOpenResultPayload {
+    pub ok: bool,
+    pub tunnel: TunnelInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelStatusPayload {
+    pub session_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelStatusResultPayload {
+    pub ok: bool,
+    pub tunnels: Vec<TunnelInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelClosePayload {
+    pub session_token: String,
+    pub tunnel_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelCloseResultPayload {
+    pub ok: bool,
+    pub tunnel: TunnelInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelStreamOpenPayload {
+    pub tunnel_id: String,
+    pub stream_id: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub source_side: TunnelEndpointSide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelStreamOpenResultPayload {
+    pub tunnel_id: String,
+    pub stream_id: String,
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelStreamControlPayload {
+    pub tunnel_id: String,
+    pub stream_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelInfo {
+    pub tunnel_id: String,
+    pub session_id: String,
+    pub direction: TunnelDirection,
+    pub listen_addr: String,
+    pub listen_port: u16,
+    pub target_host: String,
+    pub target_port: u16,
+    pub status: TunnelStatus,
+    pub opened_at: String,
+    pub last_activity_at: String,
+    pub idle_timeout_ms: u64,
+    pub bytes_from_listener: u64,
+    pub bytes_from_target: u64,
+    pub active_streams: usize,
+    pub total_streams: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
+}
+
+pub fn default_tunnel_idle_timeout_ms() -> u64 {
+    DEFAULT_TUNNEL_IDLE_TIMEOUT_MS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecArgs {
     pub program: String,
@@ -425,7 +587,7 @@ mod tests {
 
     #[test]
     fn protocol_version_marks_host_identity_routing() {
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     #[test]
@@ -479,5 +641,32 @@ mod tests {
         let payload: CommandStatusResultPayload = message.payload_as().unwrap();
         assert_eq!(payload.task_id, "task");
         assert_eq!(payload.status, CommandTaskStatus::Running);
+    }
+
+    #[test]
+    fn tunnel_open_payload_round_trips() {
+        let message = WireMessage::new(
+            TYPE_TUNNEL_OPEN,
+            Some("req".to_owned()),
+            Some("sess".to_owned()),
+            TunnelOpenPayload {
+                session_token: "secret".to_owned(),
+                tunnel_id: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                direction: TunnelDirection::Local,
+                listen_addr: "127.0.0.1".to_owned(),
+                listen_port: 15432,
+                target_host: "127.0.0.1".to_owned(),
+                target_port: 5432,
+                idle_timeout_ms: DEFAULT_TUNNEL_IDLE_TIMEOUT_MS,
+                allow_non_loopback_listen: false,
+                allow_non_loopback_target: false,
+            },
+        )
+        .unwrap();
+
+        let payload: TunnelOpenPayload = message.payload_as().unwrap();
+        assert_eq!(payload.direction, TunnelDirection::Local);
+        assert_eq!(payload.listen_port, 15432);
+        assert_eq!(payload.target_port, 5432);
     }
 }
