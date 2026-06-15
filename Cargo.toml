@@ -2,6 +2,7 @@
 members = [
     "crates/rcw-common",
     "crates/rcw-server",
+    "crates/rcw-host-core",
     "crates/rcw-host",
     "crates/rcwctl",
 ]

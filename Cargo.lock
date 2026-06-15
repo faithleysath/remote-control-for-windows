@@ -1201,6 +1201,16 @@ version = "0.1.8"
 dependencies = [
  "anyhow",
  "clap",
+ "rcw-host-core",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rcw-host-core"
+version = "0.1.8"
+dependencies = [
+ "anyhow",
  "futures-util",
  "hostname",
  "image",
@@ -1209,7 +1219,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "tracing-subscriber",
  "windows",
 ]
 
