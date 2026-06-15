@@ -27,9 +27,9 @@ rcwctl [GLOBAL_OPTIONS] <COMMAND>
 
 全局参数：
 
-- `--server <url>`：覆盖服务器地址。
-- `--token <token>`：覆盖控制端 token。默认读取 `RCW_CONTROL_TOKEN`。
-- `--session <path>`：指定本地会话文件。
+- `--server <url>`：覆盖服务器地址，默认读取 `RCW_SERVER_URL` 或编译期嵌入值。
+- `--token <token>`：覆盖控制端 token，默认读取 `RCW_CONTROL_TOKEN`。
+- `--session <path>`：指定本地会话文件。MCP 模式把状态放在进程内存里，不使用这个文件。
 - `--json`：输出 JSON。
 - `--audit-label <text>`：为本次操作写入一段简短审计说明。
 - `-v, --verbose`：输出调试信息。
@@ -107,7 +107,7 @@ JSON 输出：
 rcwctl status
 ```
 
-`status` 读取本地会话文件后向服务端发送 `session.status`，返回 session 是否有效、被控端是否在线、目标机器 ID 和服务器地址。
+`status` 读取本地会话文件后向服务端发送 `session.status`，返回 session 是否有效、被控端是否在线和目标机器 ID。
 
 ## exec
 

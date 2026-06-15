@@ -2,7 +2,14 @@
 
 `remote-control-for-windows` 是一套临时、可见、可审计的 Windows 远程协助工具。它面向授权支持场景，让研发、运维或 Codex agent 可以通过命令行完成诊断、文件传输、截图和基础 GUI 操作。
 
-项目现在已经从 v1 的从零实现阶段进入长期维护和迭代阶段。v1 远控主链路已经实现，并在真实 Windows VM 中完成主要闭环验证；后续工作应在保持当前安全模型的前提下继续强化打包、自动化验证和操作体验。
+当前 workspace 版本是 `0.1.7`，协议版本是 `v4`。项目已经从 v1 的从零实现阶段进入长期维护和迭代阶段；主链路已经在真实 Windows VM 中完成主要闭环验证，后续工作应在保持当前安全模型的前提下继续强化打包、自动化验证和操作体验。
+
+## 定位
+
+- `rcw-host.exe` 运行在可见的 Windows 控制台里，关闭窗口即终止远控。
+- `rcw-server` 只负责 host/control 中继、状态管理和审计。
+- `rcwctl` 是研发和 agent 使用的短生命周期控制端。
+- MCP 模式把连接状态和后台传输任务放在进程内存里，不污染普通 CLI 会话文件。
 
 ## 组件
 
@@ -77,7 +84,9 @@ export RCW_CONTROL_TOKEN='replace-with-a-random-token'
 
 rcwctl connect --id <machine-id> --totp <current-totp>
 rcwctl status
-rcwctl exec -- pwsh -NoProfile -Command "hostname"
+rcwctl exec --timeout 30s --wait 90s -- pwsh -NoProfile -Command "hostname"
+rcwctl exec-status <task_id>
+rcwctl exec-cancel <task_id>
 rcwctl screenshot --output screen.png
 rcwctl disconnect
 ```
@@ -163,7 +172,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
   cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
-## 文档
+## 文档导航
 
 根目录 `README.md` 是项目首页，面向第一次进入仓库的人；`docs/README.md` 是文档目录索引，面向需要深入查阅设计、测试、发布和维护资料的人。两者不是重复正文，职责不同。
 
