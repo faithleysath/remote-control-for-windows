@@ -1,0 +1,18 @@
+[package]
+name = "rcw-host-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rcw-common = { path = "../../rcw-common" }
+rcw-host-core = { path = "../../rcw-host-core" }
+tauri.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

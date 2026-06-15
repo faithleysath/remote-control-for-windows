@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal host GUI capability. The window can invoke the read-only host snapshot command and listen for core host events; shell and fs plugins are not enabled.",
+  "windows": ["main"],
+  "permissions": ["allow-host-snapshot", "core:event:default"]
+}

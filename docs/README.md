@@ -16,6 +16,7 @@
 - [测试与验证](testing.md)：本地检查、Windows VM E2E 计划、当前验证证据和剩余验证缺口。
 - [发布流程](release.md)：发布清单、产物、交叉构建命令和验证要求。
 - [Windows 实现说明](windows-apis.md)：`rcw-host.exe` 使用的 Win32 API 和平台行为。
+- [Tauri Host GUI](host-gui.md)：GUI 工程目录、开发启动命令、Tauri command/event 边界和 capability 基线。
 - [路线图](roadmap.md)：已完成的 v1 基线、维护优先级和明确不做的能力。
 
 ## 验证记录
