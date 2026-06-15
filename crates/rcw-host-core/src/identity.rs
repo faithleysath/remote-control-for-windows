@@ -12,6 +12,11 @@ pub(crate) struct SingleInstanceGuard {
     path: PathBuf,
 }
 
+// The guard only owns an OS mutex/file-lock handle and closes it on drop. It does
+// not expose handle mutation, and releasing these handles is thread-independent.
+unsafe impl Send for SingleInstanceGuard {}
+unsafe impl Sync for SingleInstanceGuard {}
+
 impl SingleInstanceGuard {
     pub(crate) fn acquire() -> Result<Self> {
         #[cfg(windows)]

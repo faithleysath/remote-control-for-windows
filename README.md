@@ -15,7 +15,7 @@
 
 - `rcw-server`：WebSocket 中继服务器，连接被控端和控制端。
 - `rcw-host.exe`：客户或测试人员在 Windows 上运行的可见被控端。
-- `rcw-host-gui`：Tauri v2 GUI host 工程，当前提供最小 snapshot 窗口和事件流骨架。
+- `rcw-host-gui`：Tauri v2 GUI host 工程，提供概览、会话和设置页 MVP。
 - `rcwctl`：研发、脚本或 Codex agent 使用的控制端 CLI。
 - `rcw-common`：共享协议、ID、TOTP、审计、配置和传输逻辑。
 

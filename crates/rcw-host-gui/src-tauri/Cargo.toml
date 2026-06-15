@@ -12,6 +12,8 @@ tauri-build.workspace = true
 anyhow.workspace = true
 rcw-common = { path = "../../rcw-common" }
 rcw-host-core = { path = "../../rcw-host-core" }
+serde.workspace = true
+serde_json.workspace = true
 tauri.workspace = true
 tokio.workspace = true
 tracing.workspace = true

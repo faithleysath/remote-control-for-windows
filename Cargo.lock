@@ -2785,6 +2785,8 @@ dependencies = [
  "anyhow",
  "rcw-common",
  "rcw-host-core",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",

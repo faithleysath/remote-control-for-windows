@@ -1,6 +1,8 @@
 # Tauri Host GUI
 
-`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程骨架。当前阶段只提供最小窗口、只读 host snapshot 和 Rust 到前端的 `HostEvent` 推送通道；完整页面、托盘、安装包和任务操作入口放到后续 GUI issue。
+`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话和设置三页，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态并结束当前会话。
+
+当前仍不包含 exec/transfer/tunnel 任务页、托盘、安装包或后台自启动。
 
 ## 目录
 
@@ -17,8 +19,8 @@ Rust workspace 成员是 `crates/rcw-host-gui/src-tauri`。前端通过 `@tauri-
 
 ```bash
 cd crates/rcw-host-gui
-npm install
-RCW_SERVER_URL=ws://127.0.0.1:7800 npm run tauri:dev
+npm ci
+npm run tauri:dev
 ```
 
 GUI 复用 `rcw-host-core` 的配置解析：
@@ -27,13 +29,57 @@ GUI 复用 `rcw-host-core` 的配置解析：
 - `RCW_TOTP_PERIOD_SECONDS` 或编译期 `RCW_EMBED_TOTP_PERIOD_SECONDS` 配置 TOTP 周期。
 - host 不读取 `RCW_CONTROL_TOKEN`。
 
+如果没有保存过 GUI 设置，且环境变量/编译期配置也没有提供 server URL，GUI 默认使用 `ws://127.0.0.1:7800`，方便本地 smoke。正式分发时应通过设置页、环境变量或编译期配置写入实际 server。
+
 如果本地没有启动 `rcw-server`，窗口仍会启动并显示 `reconnecting` 状态，用于验证 snapshot 和事件流。
+
+## 页面范围
+
+概览页显示：
+
+- listener 状态和更新时间
+- server URL
+- machine id / host id
+- 当前 TOTP 和倒计时
+- 当前 session 摘要
+- command / transfer / tunnel 计数
+- audit log 路径
+- Start / Stop / Reconnect / Copy 操作
+
+会话页显示：
+
+- controller label
+- session id
+- opened / last closed 时间
+- close reason
+- auth request 历史
+- End Session 操作
+
+设置页显示和保存：
+
+- server URL
+- TOTP 周期
+- audit log 路径
+- 启动后自动监听
+
+设置保存到 Tauri app config 目录下的 `host-gui.json`。保存时的生效规则是：
+
+- listener 已停止：立即重建 stopped runtime，下一次 Start 使用新配置。
+- listener 运行中：只保存文件并标记 `restart_required`；用户点击 Reconnect 或 Stop 后再 Start 才应用运行时配置，避免保存设置时自动断开当前会话。
+- `auto_listen` 只影响下一次 GUI 启动，不要求重启 listener。
 
 ## Command 边界
 
-当前通过 `tauri_build::AppManifest::commands(&["host_snapshot"])` 只生成一个应用 command permission，并在 `capabilities/default.json` 中显式授权：
+当前通过 `tauri_build::AppManifest::commands(...)` 为下列应用 command 生成权限，并在 `capabilities/default.json` 中显式授权：
 
 - `host_snapshot`：返回 `rcw-host-core::HostSnapshot`，供前端显示机器 ID、host ID、TOTP、listener 状态、session、任务计数和审计路径。
+- `host_settings`：返回 GUI 设置和配置文件路径。
+- `host_save_settings`：校验并保存 GUI 设置。
+- `host_start_listener`：启动 listener；如果 listener 已停止，会先应用已保存的运行时配置。
+- `host_stop_listener`：停止 listener；如果存在 pending runtime 设置，会在停止后应用。
+- `host_restart_listener`：使用已保存的运行时配置重启 listener。
+- `host_copy_connection_info`：通过 host-core/platform 复制连接信息，并返回同一份文本给前端兜底。
+- `host_close_current_session`：请求结束当前 session。
 
 前端没有直接访问协议 socket、文件系统、shell 或底层 Windows API 的入口。后续新增 GUI 操作时，应先在 `rcw-host-core` 暴露明确的控制 API，再通过窄 Tauri command 调用。
 
@@ -41,11 +87,20 @@ GUI 复用 `rcw-host-core` 的配置解析：
 
 GUI 启动时订阅 `HostService::subscribe_events()`，并通过 Tauri core event `host-event` 推送到前端。前端使用 `@tauri-apps/api/event.listen("host-event", ...)` 接收事件，并在收到事件后刷新 snapshot。
 
+当 GUI 应用新的 runtime 配置时，`HostService` 会生成新的 host context 和事件源；GUI 会重新订阅事件转发。
+
 ## Tauri 权限基线
 
 `src-tauri/capabilities/default.json` 只绑定 `main` 窗口，并只开放：
 
 - `allow-host-snapshot`
+- `allow-host-settings`
+- `allow-host-save-settings`
+- `allow-host-start-listener`
+- `allow-host-stop-listener`
+- `allow-host-restart-listener`
+- `allow-host-copy-connection-info`
+- `allow-host-close-current-session`
 - `core:event:default`
 
 当前不启用 shell 插件，不启用 fs 插件，也不配置任意文件系统 scope。前端 bundle 的 CSP 使用 `default-src 'self'`，只允许本地资源和内联样式。

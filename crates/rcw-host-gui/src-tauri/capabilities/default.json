@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal host GUI capability. The window can invoke the read-only host snapshot command and listen for core host events; shell and fs plugins are not enabled.",
+  "description": "Host GUI capability. The main window can invoke narrow host control and settings commands and listen for core host events; shell and fs plugins are not enabled.",
   "windows": ["main"],
-  "permissions": ["allow-host-snapshot", "core:event:default"]
+  "permissions": [
+    "allow-host-snapshot",
+    "allow-host-settings",
+    "allow-host-save-settings",
+    "allow-host-start-listener",
+    "allow-host-stop-listener",
+    "allow-host-restart-listener",
+    "allow-host-copy-connection-info",
+    "allow-host-close-current-session",
+    "core:event:default"
+  ]
 }
