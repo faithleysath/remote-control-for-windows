@@ -45,3 +45,8 @@ jobs:
         run: |
           npm test
           npm run pack:check
+      - name: Check host GUI frontend
+        working-directory: crates/rcw-host-gui
+        run: |
+          npm ci
+          npm run build

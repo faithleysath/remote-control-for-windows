@@ -25,6 +25,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
@@ -43,6 +47,11 @@ jobs:
           cargo fmt --check
           cargo test --workspace
           cargo clippy --workspace -- -D warnings
+      - name: Check host GUI frontend
+        working-directory: crates/rcw-host-gui
+        run: |
+          npm ci
+          npm run build
 
   build-tools:
     needs: verify
@@ -177,10 +186,56 @@ jobs:
           path: dist/release/*
           if-no-files-found: error
 
+  build-host-gui:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+      - name: Install host GUI frontend dependencies
+        working-directory: crates/rcw-host-gui
+        run: npm ci
+      - name: Build host GUI
+        working-directory: crates/rcw-host-gui
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target ${{ matrix.target }} --no-bundle --ci
+      - name: Package host GUI
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          package="rcw-host-gui-${target}"
+          rm -rf dist
+          mkdir -p "dist/${package}" dist/release
+          cp "target/${target}/release/rcw-host-gui.exe" "dist/${package}/"
+          cp README.md CHANGELOG.md LICENSE "dist/${package}/"
+          cp docs/host-gui.md "dist/${package}/"
+          (cd dist && python3 -m zipfile -c "release/${package}.zip" "${package}")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rcw-host-gui-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+
   publish:
     needs:
       - build-tools
       - build-host
+      - build-host-gui
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

@@ -33,6 +33,8 @@ git push origin v0.1.8
    cargo fmt --check
    cargo test --workspace
    cargo clippy --workspace -- -D warnings
+   npm --prefix crates/rcw-host-gui ci
+   npm --prefix crates/rcw-host-gui run build
    ```
 
 4. 运行 Windows host 交叉检查：
@@ -42,6 +44,8 @@ git push origin v0.1.8
      cargo xwin clippy -p rcw-host --target x86_64-pc-windows-msvc --release -- -D warnings
    RUSTFLAGS='-C target-feature=+crt-static' \
      cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
+   (cd crates/rcw-host-gui && RUSTFLAGS='-C target-feature=+crt-static' \
+     npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target x86_64-pc-windows-msvc --no-bundle --ci)
    ```
 
 5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
@@ -61,7 +65,7 @@ git push origin v0.1.8
 - Windows x86-64：`x86_64-pc-windows-msvc`
 - Windows arm64：`aarch64-pc-windows-msvc`
 
-`rcwctl` 和 `rcw-server` 会发布到上述全部目标。`rcw-host.exe` 只发布 Windows x86-64 和 Windows arm64。
+`rcwctl` 和 `rcw-server` 会发布到上述全部目标。`rcw-host.exe` 和 `rcw-host-gui.exe` 只发布 Windows x86-64 和 Windows arm64。
 
 npm 侧会发布一个元包和六个平台包：
 
@@ -98,6 +102,20 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 target/x86_64-pc-windows-msvc/release/rcw-host.exe
 ```
 
+从 Linux 构建 Windows host GUI：
+
+```bash
+npm --prefix crates/rcw-host-gui ci
+(cd crates/rcw-host-gui && RUSTFLAGS='-C target-feature=+crt-static' \
+  npx tauri build --runner "$HOME/.cargo/bin/cargo-xwin" --target x86_64-pc-windows-msvc --no-bundle --ci)
+```
+
+预期 host GUI 产物：
+
+```text
+target/x86_64-pc-windows-msvc/release/rcw-host-gui.exe
+```
+
 ## 产物结构
 
 自动发布会生成：
@@ -112,6 +130,8 @@ GitHub Release assets:
   rcw-tools-aarch64-pc-windows-msvc.zip
   rcw-host-x86_64-pc-windows-msvc.zip
   rcw-host-aarch64-pc-windows-msvc.zip
+  rcw-host-gui-x86_64-pc-windows-msvc.zip
+  rcw-host-gui-aarch64-pc-windows-msvc.zip
   checksums.txt
 
 npm packages:
@@ -124,7 +144,7 @@ npm packages:
   rcwctl-windows-arm64
 ```
 
-`rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 被控端。`checksums.txt` 使用 SHA-256，包含所有发布包。
+`rcw-tools-*` 包含 `rcwctl` 和 `rcw-server`。`rcw-host-*` 包含 Windows 控制台被控端。`rcw-host-gui-*` 包含 Windows GUI 被控端和 `docs/host-gui.md`。`checksums.txt` 使用 SHA-256，包含所有发布包。
 
 `rcwctl` 不再走 `postinstall` 下载 GitHub Release；它只负责把平台包作为依赖暴露给用户。
 
@@ -141,12 +161,13 @@ npm packages:
 
 ## Windows Host 验证
 
-发布 `rcw-host.exe` 前确认：
+发布 `rcw-host.exe` 或 `rcw-host-gui.exe` 前确认：
 
 - 文件是 Windows x86-64 PE 可执行文件。
 - 静态 CRT 构建在干净 Windows 环境中不依赖 `VCRUNTIME140.dll`。
 - host 能从交互桌面启动并连接中继。
 - 截图和输入操作在交互桌面中测试过，而不只是 session 0 或非交互服务上下文。
+- GUI 包还应至少完成窗口启动、概览页渲染、启动/停止/重连和基础 tab 切换 smoke。
 
 ## 发布后
 

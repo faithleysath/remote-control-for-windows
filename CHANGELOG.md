@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- 发布 workflow 增加 `rcw-host-gui` Windows artifact 构建，CI/release verify 增加 GUI 前端构建检查。
+
 ## 0.1.8 - 2026-06-15
 
 - 升级 wire protocol 到 v5，新增 `tunnel.open` / `tunnel.status` / `tunnel.close` 和 `tunnel.stream_*` 控制消息，以及独立 `TunnelData` binary frame。
