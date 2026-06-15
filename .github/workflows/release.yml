@@ -216,7 +216,7 @@ jobs:
             fi
             sudo ln -s "$llvm_rc" /usr/local/bin/llvm-rc
           fi
-          llvm-rc --version
+          command -v llvm-rc
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --locked
       - name: Install host GUI frontend dependencies
