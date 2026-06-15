@@ -22,7 +22,7 @@ use tracing::warn;
 use crate::{
     audit::append_host_audit,
     output::{send_complete_kind, send_error, WsSink},
-    HostContext,
+    HostContext, HostTaskStatus, HostTransferDirection,
 };
 
 pub(crate) const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -77,6 +77,12 @@ pub(crate) fn begin_upload(
         message.session_id.clone(),
         Some(payload.command),
         Some("started"),
+    );
+    context.state.record_transfer_started(
+        request_id.clone(),
+        message.session_id.clone(),
+        HostTransferDirection::Upload,
+        Some(args.size),
     );
     uploads.insert(
         request_id,
@@ -165,8 +171,23 @@ pub(crate) async fn handle_binary_frame(
 
     if let Some((session_id, code, message)) = action {
         uploads.remove(&request_id);
+        context.state.record_transfer_completed(
+            request_id.clone(),
+            session_id.clone(),
+            HostTaskStatus::Failed,
+            None,
+            "failed".to_owned(),
+        );
         send_error(sink, Some(request_id), session_id, code, &message).await?;
         return Ok(());
+    }
+
+    if let Some(state) = uploads.get(&request_id) {
+        context.state.record_transfer_progress(
+            request_id.clone(),
+            state.session_id.clone(),
+            state.bytes_written,
+        );
     }
 
     let complete = uploads
@@ -192,6 +213,13 @@ async fn finalize_upload(
         file.flush()?;
     }
     if state.bytes_written != state.args.size {
+        context.state.record_transfer_completed(
+            request_id.to_owned(),
+            state.session_id.clone(),
+            HostTaskStatus::Failed,
+            Some(state.bytes_written),
+            "size_mismatch".to_owned(),
+        );
         send_error(
             sink,
             Some(request_id.to_owned()),
@@ -204,6 +232,13 @@ async fn finalize_upload(
     }
     let actual = std::mem::replace(&mut state.hasher, Sha256Accumulator::new()).finalize();
     if actual != state.args.sha256 {
+        context.state.record_transfer_completed(
+            request_id.to_owned(),
+            state.session_id.clone(),
+            HostTaskStatus::Failed,
+            Some(state.bytes_written),
+            "checksum_mismatch".to_owned(),
+        );
         send_error(
             sink,
             Some(request_id.to_owned()),
@@ -234,6 +269,13 @@ async fn finalize_upload(
         },
     )
     .await?;
+    context.state.record_transfer_completed(
+        request_id.to_owned(),
+        state.session_id.clone(),
+        HostTaskStatus::Completed,
+        Some(state.bytes_written),
+        "ok".to_owned(),
+    );
     append_host_audit(
         context,
         "command.complete",

@@ -88,6 +88,7 @@ pub(crate) async fn run_host_connection(
     let tunnel_streams = new_tunnel_streams();
     let mut upload_sweep = tokio::time::interval(UPLOAD_SWEEP_INTERVAL);
     println!("Connection: connected");
+    context.state.record_connected();
     append_host_audit(&context, "host.connected", None, None, None, Some("ok"));
 
     loop {
@@ -155,11 +156,15 @@ pub(crate) async fn run_host_connection(
     }
 
     println!("Connection: disconnected");
+    let disconnected_session = active_session.clone();
+    context
+        .state
+        .record_disconnected(disconnected_session.clone());
     append_host_audit(
         &context,
         "host.disconnected",
         None,
-        active_session,
+        disconnected_session,
         None,
         Some("ok"),
     );
@@ -203,6 +208,9 @@ async fn handle_server_message(
                 let mut sink = sink.lock().await;
                 send_json(&mut sink, auth_result).await?;
             }
+            context
+                .state
+                .record_auth_request(request_id.clone(), payload.controller_label, ok);
             append_host_audit(
                 context,
                 "session.auth",
@@ -217,6 +225,9 @@ async fn handle_server_message(
             *runtime.active_session = Some(payload.session_id.clone());
             println!("Session: active");
             println!("Controller: {}", payload.controller_label);
+            context
+                .state
+                .record_session_opened(payload.session_id.clone(), payload.controller_label);
             append_host_audit(
                 context,
                 "session.opened",
@@ -231,6 +242,9 @@ async fn handle_server_message(
             let session_id = payload.session_id.clone();
             println!("Session: closed ({})", payload.reason);
             *runtime.active_session = None;
+            context
+                .state
+                .record_session_closed(session_id.clone(), payload.reason);
             remove_uploads_for_session(runtime.uploads, &session_id);
             cancel_command_tasks_for_session(runtime.command_tasks, &session_id);
             remove_tunnels_for_session(runtime.tunnel_tasks, &session_id);
@@ -264,7 +278,11 @@ async fn handle_server_message(
         }
         TYPE_COMMAND_CANCEL => {
             if let Some(request_id) = &message.request_id {
-                runtime.uploads.remove(request_id);
+                if runtime.uploads.remove(request_id).is_some() {
+                    context
+                        .state
+                        .record_cancel_requested(request_id.clone(), message.session_id.clone());
+                }
             }
             cancel_command_task(context, sink, runtime.command_tasks, message).await?;
         }

@@ -4,6 +4,7 @@ mod connection;
 mod identity;
 mod output;
 mod platform;
+mod state;
 mod tunnel;
 mod upload;
 
@@ -20,6 +21,13 @@ use tracing::warn;
 
 use crate::{
     audit::append_host_audit, connection::run_host_connection, identity::SingleInstanceGuard,
+};
+
+pub use state::{
+    HostAuthRequestSnapshot, HostCommandTaskSnapshot, HostErrorSnapshot, HostEvent, HostEventKind,
+    HostListenerSnapshot, HostListenerStatus, HostPowerSnapshot, HostSessionSnapshot, HostSnapshot,
+    HostTaskStatus, HostTotpSnapshot, HostTransferDirection, HostTransferTaskSnapshot,
+    HostTunnelSnapshot,
 };
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -61,6 +69,7 @@ pub struct HostContext {
     pub(crate) totp_seed: Arc<Vec<u8>>,
     pub(crate) totp_period_seconds: u64,
     pub(crate) audit_path: PathBuf,
+    pub(crate) state: state::HostStateHandle,
 }
 
 impl HostContext {
@@ -101,6 +110,23 @@ impl HostContext {
             totp: self.current_totp(),
             totp_period_seconds: self.totp_period_seconds,
         }
+    }
+
+    pub fn snapshot(&self) -> HostSnapshot {
+        let now = platform::unix_now();
+        let remaining_seconds = self
+            .totp_period_seconds
+            .saturating_sub(now % self.totp_period_seconds)
+            .max(1);
+        self.state.snapshot(HostTotpSnapshot {
+            current_code: self.current_totp(),
+            period_seconds: self.totp_period_seconds,
+            remaining_seconds,
+        })
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<HostEvent> {
+        self.state.subscribe()
     }
 }
 
@@ -158,6 +184,24 @@ impl HostService {
         let host_id = new_host_id();
         let seed = Arc::new(totp::random_seed());
         let power = platform::PowerGuard::acquire();
+        let power_snapshot = match &power {
+            Ok(guard) => HostPowerSnapshot {
+                active: guard.active(),
+                warning: None,
+            },
+            Err(err) => HostPowerSnapshot {
+                active: false,
+                warning: Some(err.to_string()),
+            },
+        };
+        let state = state::HostStateHandle::new(state::HostStateMetadata {
+            server_url: server_url.clone(),
+            machine_id: machine_id.clone(),
+            host_id: host_id.clone(),
+            totp_period_seconds: period,
+            audit_path: audit_path.clone(),
+            power: power_snapshot,
+        });
         let context = Arc::new(HostContext {
             server_url,
             host_id,
@@ -165,6 +209,7 @@ impl HostService {
             totp_seed: seed,
             totp_period_seconds: period,
             audit_path,
+            state,
         });
 
         Ok(Self {
@@ -191,6 +236,14 @@ impl HostService {
         self.context.connection_info()
     }
 
+    pub fn snapshot(&self) -> HostSnapshot {
+        self.context.snapshot()
+    }
+
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<HostEvent> {
+        self.context.subscribe_events()
+    }
+
     pub fn copy_connection_info(&self) -> Result<HostConnectionInfo> {
         let info = self.connection_info();
         platform::copy_connection_info(&info.clipboard_text())?;
@@ -209,10 +262,16 @@ impl HostService {
     {
         'run: loop {
             if *shutdown.borrow() {
+                self.context
+                    .state
+                    .record_listener_status(HostListenerStatus::Stopped, None);
                 on_event(HostLoopEvent::Stopped);
                 break;
             }
 
+            self.context
+                .state
+                .record_listener_status(HostListenerStatus::Connecting, None);
             let mut connection = self.spawn_connection(shutdown.clone());
             tokio::select! {
                 result = &mut connection => {
@@ -223,16 +282,25 @@ impl HostService {
 
                     match result {
                         Ok(Ok(())) => {
+                            self.context
+                                .state
+                                .record_listener_status(HostListenerStatus::Reconnecting, None);
                             on_event(HostLoopEvent::Reconnecting { reason: None });
                         }
                         Ok(Err(err)) => {
                             let reason = err.to_string();
                             warn!("host connection failed: {reason}");
+                            self.context
+                                .state
+                                .record_listener_status(HostListenerStatus::Reconnecting, Some(reason.clone()));
                             on_event(HostLoopEvent::Reconnecting { reason: Some(reason) });
                         }
                         Err(err) => {
                             let reason = err.to_string();
                             warn!("host connection task failed: {reason}");
+                            self.context
+                                .state
+                                .record_listener_status(HostListenerStatus::Reconnecting, Some(reason.clone()));
                             on_event(HostLoopEvent::Reconnecting { reason: Some(reason) });
                         }
                     }
@@ -249,7 +317,13 @@ impl HostService {
                         _ = tokio::time::sleep(RECONNECT_DELAY) => {}
                         changed = shutdown.changed() => {
                             if changed.is_ok() && *shutdown.borrow() {
+                                self.context
+                                    .state
+                                    .record_listener_status(HostListenerStatus::Stopping, None);
                                 on_event(HostLoopEvent::Stopping);
+                                self.context
+                                    .state
+                                    .record_listener_status(HostListenerStatus::Stopped, None);
                                 on_event(HostLoopEvent::Stopped);
                                 break 'run;
                             }
@@ -258,14 +332,23 @@ impl HostService {
                 }
                 changed = shutdown.changed() => {
                     if changed.is_ok() && *shutdown.borrow() {
+                        self.context
+                            .state
+                            .record_listener_status(HostListenerStatus::Stopping, None);
                         on_event(HostLoopEvent::Stopping);
                         match tokio::time::timeout(STOP_TIMEOUT, &mut connection).await {
                             Ok(result) => handle_stop_result(result, &mut on_event),
                             Err(_) => {
                                 connection.abort();
+                                self.context
+                                    .state
+                                    .record_listener_status(HostListenerStatus::Error, Some("connection task stop timed out".to_owned()));
                                 on_event(HostLoopEvent::StopTimedOut);
                             }
                         }
+                        self.context
+                            .state
+                            .record_listener_status(HostListenerStatus::Stopped, None);
                         break;
                     }
                 }

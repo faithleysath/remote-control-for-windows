@@ -26,7 +26,9 @@ use crate::{
         send_binary_chunks, send_complete, send_error, send_output, send_shared_complete,
         send_shared_complete_kind, send_shared_error, send_shared_output, SharedWsSink, WsSink,
     },
-    platform, HostContext,
+    platform,
+    state::task_status_for_result,
+    HostContext, HostTaskStatus, HostTransferDirection,
 };
 
 const PROCESS_OUTPUT_QUEUE_CAPACITY: usize = 128;
@@ -101,6 +103,9 @@ pub(crate) async fn cancel_command_task(
     };
     if let Some(task) = command_tasks.get(&request_id) {
         task.cancel();
+        context
+            .state
+            .record_cancel_requested(request_id.clone(), message.session_id.clone());
         append_host_audit(
             context,
             "command.cancel",
@@ -124,20 +129,28 @@ async fn execute_command_inline(
         .clone()
         .ok_or_else(|| anyhow!("command.request missing request_id"))?;
     let session_id = message.session_id.clone();
+    let command_name = payload.command.clone();
     let started = Instant::now();
 
     println!(
         "[{}] {} started request={}",
         rcw_common::audit::now_rfc3339(),
-        payload.command,
+        command_name,
         request_id
+    );
+    record_task_started(
+        context,
+        &request_id,
+        session_id.clone(),
+        &command_name,
+        None,
     );
     append_host_audit(
         context,
         "command.started",
         Some(request_id.clone()),
         session_id.clone(),
-        Some(payload.command.clone()),
+        Some(command_name.clone()),
         Some("started"),
     );
 
@@ -171,19 +184,33 @@ async fn execute_command_inline(
     };
 
     let ok = result.is_ok();
+    let status = task_status_for_result(ok, result.as_ref().err());
+    let result_label = task_result_label(status);
     println!(
         "[{}] {} {} request={}",
         rcw_common::audit::now_rfc3339(),
-        payload.command,
+        command_name,
         if ok { "ok" } else { "failed" },
         request_id
+    );
+    record_task_completed(
+        context,
+        TaskCompletion {
+            request_id: &request_id,
+            session_id: session_id.clone(),
+            command: &command_name,
+            status,
+            duration_ms: started.elapsed().as_millis() as u64,
+            result: result_label,
+            bytes_transferred: None,
+        },
     );
     append_host_audit(
         context,
         "command.complete",
         Some(request_id.clone()),
         session_id.clone(),
-        Some(payload.command),
+        Some(command_name),
         Some(if ok { "ok" } else { "failed" }),
     );
 
@@ -251,19 +278,27 @@ async fn run_async_command_task(
     cancel_rx: watch::Receiver<bool>,
 ) {
     let started = Instant::now();
+    let command_name = payload.command.clone();
 
     println!(
         "[{}] {} started request={}",
         rcw_common::audit::now_rfc3339(),
-        payload.command,
+        command_name,
         request_id
+    );
+    record_task_started(
+        &context,
+        &request_id,
+        session_id.clone(),
+        &command_name,
+        None,
     );
     append_host_audit(
         &context,
         "command.started",
         Some(request_id.clone()),
         session_id.clone(),
-        Some(payload.command.clone()),
+        Some(command_name.clone()),
         Some("started"),
     );
 
@@ -292,19 +327,33 @@ async fn run_async_command_task(
     };
 
     let ok = result.is_ok();
+    let status = task_status_for_result(ok, result.as_ref().err());
+    let result_label = task_result_label(status);
     println!(
         "[{}] {} {} request={}",
         rcw_common::audit::now_rfc3339(),
-        payload.command,
+        command_name,
         if ok { "ok" } else { "failed" },
         request_id
+    );
+    record_task_completed(
+        &context,
+        TaskCompletion {
+            request_id: &request_id,
+            session_id: session_id.clone(),
+            command: &command_name,
+            status,
+            duration_ms: started.elapsed().as_millis() as u64,
+            result: result_label,
+            bytes_transferred: None,
+        },
     );
     append_host_audit(
         &context,
         "command.complete",
         Some(request_id.clone()),
         session_id.clone(),
-        Some(payload.command),
+        Some(command_name),
         Some(if ok { "ok" } else { "failed" }),
     );
 
@@ -349,6 +398,68 @@ fn error_code_for_command_error(err: &anyhow::Error) -> ErrorCode {
     } else {
         ErrorCode::CommandFailed
     }
+}
+
+fn record_task_started(
+    context: &HostContext,
+    request_id: &str,
+    session_id: Option<String>,
+    command: &str,
+    size: Option<u64>,
+) {
+    if command == COMMAND_DOWNLOAD_BEGIN {
+        context.state.record_transfer_started(
+            request_id.to_owned(),
+            session_id,
+            HostTransferDirection::Download,
+            size,
+        );
+    } else {
+        context
+            .state
+            .record_command_started(request_id.to_owned(), session_id, command.to_owned());
+    }
+}
+
+struct TaskCompletion<'a> {
+    request_id: &'a str,
+    session_id: Option<String>,
+    command: &'a str,
+    status: HostTaskStatus,
+    duration_ms: u64,
+    result: String,
+    bytes_transferred: Option<u64>,
+}
+
+fn record_task_completed(context: &HostContext, completion: TaskCompletion<'_>) {
+    if completion.command == COMMAND_DOWNLOAD_BEGIN {
+        context.state.record_transfer_completed(
+            completion.request_id.to_owned(),
+            completion.session_id,
+            completion.status,
+            completion.bytes_transferred,
+            completion.result,
+        );
+    } else {
+        context.state.record_command_completed(
+            completion.request_id.to_owned(),
+            completion.session_id,
+            completion.command.to_owned(),
+            completion.status,
+            completion.duration_ms,
+            completion.result,
+        );
+    }
+}
+
+fn task_result_label(status: HostTaskStatus) -> String {
+    match status {
+        HostTaskStatus::Running => "running",
+        HostTaskStatus::Completed => "completed",
+        HostTaskStatus::Failed => "failed",
+        HostTaskStatus::Cancelled => "cancelled",
+    }
+    .to_owned()
 }
 
 async fn command_exec(

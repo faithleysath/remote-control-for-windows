@@ -194,6 +194,7 @@ pub(crate) async fn handle_tunnel_open(
         Some(format!("{:?}", payload.direction)),
         Some("ok"),
     );
+    context.state.record_tunnel_opened(info.clone());
     send_open_result(sink, request_id, session_id, true, info).await
 }
 
@@ -228,6 +229,11 @@ pub(crate) async fn handle_tunnel_close(
         session_id.clone(),
         Some(payload.tunnel_id.clone()),
         Some("ok"),
+    );
+    context.state.record_tunnel_closed(
+        payload.tunnel_id.clone(),
+        session_id.clone(),
+        Some("controller_close".to_owned()),
     );
     let info = TunnelInfo {
         tunnel_id: payload.tunnel_id,
