@@ -4,6 +4,8 @@
 
 ## 未发布
 
+## 0.1.9 - 2026-06-16
+
 - 推进 GUI Host 转型 epic 的 #12-#18：抽出 `rcw-host-core` 运行时，并保持控制台 `rcw-host` 入口兼容，让 CLI host 和 GUI host 共享连接循环、命令执行、上传下载、隧道、平台 API、单实例锁和审计逻辑。
 - 新增 `HostSnapshot` / `HostEvent` 状态模型和事件订阅入口，记录 listener、TOTP、session、auth、command、transfer、tunnel、错误和最近事件历史，供 CLI、GUI 和 audit 共用。
 - 暴露 host 生命周期控制 API，支持启动、停止、重启 listener、使用新配置重启、结束当前 session、取消任务和关闭 tunnel；新增 `host.session_close` / `host.session_close_result`，协议版本提升到 v6。

@@ -2733,7 +2733,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rcw-common"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-host"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-host-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -2780,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-host-gui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "rcw-common",
@@ -2796,7 +2796,7 @@ dependencies = [
 
 [[package]]
 name = "rcw-server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "rcwctl"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
