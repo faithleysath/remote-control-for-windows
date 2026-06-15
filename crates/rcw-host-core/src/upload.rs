@@ -30,6 +30,7 @@ pub(crate) const UPLOAD_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct UploadState {
     pub(crate) session_id: Option<String>,
+    audit_label: Option<String>,
     args: UploadArgs,
     file: Option<File>,
     temp_path: PathBuf,
@@ -37,6 +38,8 @@ pub(crate) struct UploadState {
     total_sequences: u32,
     bytes_written: u64,
     hasher: Sha256Accumulator,
+    started_at: String,
+    started: Instant,
     last_activity: Instant,
 }
 
@@ -65,10 +68,11 @@ pub(crate) fn begin_upload(
     let remote_path = PathBuf::from(&args.remote_path);
     let temp_path = temp_output_path(&remote_path, &request_id);
     let file = create_temp_output_file(&remote_path, &temp_path, args.overwrite)?;
+    let started_at = rcw_common::audit::now_rfc3339();
+    let started = Instant::now();
     println!(
         "[{}] upload waiting for chunks request={}",
-        rcw_common::audit::now_rfc3339(),
-        request_id
+        started_at, request_id
     );
     let details = upload_audit_details(&args);
     append_upload_audit(
@@ -78,8 +82,13 @@ pub(crate) fn begin_upload(
             request_id: &request_id,
             session_id: message.session_id.clone(),
             command: Some(payload.command.clone()),
+            audit_label: payload.audit_label.clone(),
             details: &details,
             result: "started",
+            started_at: Some(started_at.clone()),
+            finished_at: None,
+            duration_ms: None,
+            bytes: None,
             error_code: None,
             error_message: None,
         },
@@ -94,6 +103,7 @@ pub(crate) fn begin_upload(
         request_id,
         UploadState {
             session_id: message.session_id,
+            audit_label: payload.audit_label,
             args,
             file: Some(file),
             temp_path,
@@ -101,6 +111,8 @@ pub(crate) fn begin_upload(
             total_sequences,
             bytes_written: 0,
             hasher: Sha256Accumulator::new(),
+            started_at,
+            started,
             last_activity: Instant::now(),
         },
     );
@@ -146,6 +158,9 @@ pub(crate) async fn handle_binary_frame(
         if frame.total_sequences != state.total_sequences {
             Some((
                 state.session_id.clone(),
+                state.audit_label.clone(),
+                state.started_at.clone(),
+                state.started.elapsed().as_millis() as u64,
                 ErrorCode::InternalError,
                 format!(
                     "upload chunk total sequence mismatch: expected {}, got {}",
@@ -155,6 +170,9 @@ pub(crate) async fn handle_binary_frame(
         } else if frame.sequence != state.next_sequence {
             Some((
                 state.session_id.clone(),
+                state.audit_label.clone(),
+                state.started_at.clone(),
+                state.started.elapsed().as_millis() as u64,
                 ErrorCode::InternalError,
                 format!(
                     "upload chunk sequence mismatch: expected {}, got {}",
@@ -175,7 +193,7 @@ pub(crate) async fn handle_binary_frame(
         }
     };
 
-    if let Some((session_id, code, message)) = action {
+    if let Some((session_id, audit_label, started_at, duration_ms, code, message)) = action {
         uploads.remove(&request_id);
         context.state.record_transfer_completed(
             request_id.clone(),
@@ -194,8 +212,13 @@ pub(crate) async fn handle_binary_frame(
                 request_id: &request_id,
                 session_id: session_id.clone(),
                 command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                audit_label,
                 details: &details,
                 result: "failed",
+                started_at: Some(started_at),
+                finished_at: Some(rcw_common::audit::now_rfc3339()),
+                duration_ms: Some(duration_ms),
+                bytes: None,
                 error_code: Some(format!("{code:?}")),
                 error_message: Some(message.clone()),
             },
@@ -250,8 +273,13 @@ async fn finalize_upload(
                 request_id,
                 session_id: state.session_id.clone(),
                 command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                audit_label: state.audit_label.clone(),
                 details: &details,
                 result: "failed",
+                started_at: Some(state.started_at.clone()),
+                finished_at: Some(rcw_common::audit::now_rfc3339()),
+                duration_ms: Some(state.started.elapsed().as_millis() as u64),
+                bytes: Some(state.bytes_written),
                 error_code: Some(format!("{:?}", ErrorCode::ChecksumMismatch)),
                 error_message: Some("upload size mismatch".to_owned()),
             },
@@ -283,8 +311,13 @@ async fn finalize_upload(
                 request_id,
                 session_id: state.session_id.clone(),
                 command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                audit_label: state.audit_label.clone(),
                 details: &details,
                 result: "failed",
+                started_at: Some(state.started_at.clone()),
+                finished_at: Some(rcw_common::audit::now_rfc3339()),
+                duration_ms: Some(state.started.elapsed().as_millis() as u64),
+                bytes: Some(state.bytes_written),
                 error_code: Some(format!("{:?}", ErrorCode::ChecksumMismatch)),
                 error_message: Some(ErrorCode::ChecksumMismatch.message().to_owned()),
             },
@@ -334,8 +367,13 @@ async fn finalize_upload(
             request_id,
             session_id: state.session_id.clone(),
             command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+            audit_label: state.audit_label.clone(),
             details: &details,
             result: "ok",
+            started_at: Some(state.started_at.clone()),
+            finished_at: Some(rcw_common::audit::now_rfc3339()),
+            duration_ms: Some(state.started.elapsed().as_millis() as u64),
+            bytes: Some(state.bytes_written),
             error_code: None,
             error_message: None,
         },
@@ -348,8 +386,13 @@ struct UploadAudit<'a> {
     request_id: &'a str,
     session_id: Option<String>,
     command: Option<String>,
+    audit_label: Option<String>,
     details: &'a CommandAuditDetails,
     result: &'a str,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    duration_ms: Option<u64>,
+    bytes: Option<u64>,
     error_code: Option<String>,
     error_message: Option<String>,
 }
@@ -361,12 +404,16 @@ fn append_upload_audit(context: &HostContext, audit: UploadAudit<'_>) {
     record.task_id = Some(audit.request_id.to_owned());
     record.command = audit.command;
     record.command_kind = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+    record.audit_label = audit.audit_label;
     record.result = Some(audit.result.to_owned());
+    record.started_at = audit.started_at;
+    record.finished_at = audit.finished_at;
+    record.duration_ms = audit.duration_ms;
     record.error_code = audit.error_code;
     record.error_message = audit.error_message;
     record.args_summary = audit.details.args_summary.clone();
     record.path_summary = audit.details.path_summary.clone();
-    record.bytes = audit.details.bytes;
+    record.bytes = audit.bytes.or(audit.details.bytes);
     record.size = audit.details.size;
     record.sha256 = audit.details.sha256.clone();
     append_host_audit_record(context, record);
