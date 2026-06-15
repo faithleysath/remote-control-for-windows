@@ -21,7 +21,9 @@ use tokio::{
 use tracing::error;
 
 use crate::{
-    audit::append_host_audit,
+    audit::{
+        append_host_audit_record, command_audit_details, CommandAuditDetails, HostAuditRecord,
+    },
     output::{
         send_binary_chunks, send_complete, send_error, send_output, send_shared_complete,
         send_shared_complete_kind, send_shared_error, send_shared_output, SharedWsSink, WsSink,
@@ -37,6 +39,7 @@ pub(crate) type CommandTasks = HashMap<String, CommandTask>;
 
 pub(crate) struct CommandTask {
     pub(crate) session_id: Option<String>,
+    pub(crate) command: String,
     cancel_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
 }
@@ -106,14 +109,17 @@ pub(crate) async fn cancel_command_task(
         context
             .state
             .record_cancel_requested(request_id.clone(), message.session_id.clone());
-        append_host_audit(
-            context,
+        let mut record = HostAuditRecord::new(
+            crate::audit::category_for_command(&task.command),
             "command.cancel",
-            Some(request_id),
-            message.session_id,
-            None,
-            Some("requested"),
         );
+        record.request_id = Some(request_id);
+        record.session_id = message.session_id;
+        record.task_id = record.request_id.clone();
+        record.command = Some(task.command.clone());
+        record.command_kind = Some(task.command.clone());
+        record.result = Some("requested".to_owned());
+        append_host_audit_record(context, record);
     }
     Ok(())
 }
@@ -130,13 +136,14 @@ async fn execute_command_inline(
         .ok_or_else(|| anyhow!("command.request missing request_id"))?;
     let session_id = message.session_id.clone();
     let command_name = payload.command.clone();
+    let audit_label = payload.audit_label.clone();
+    let audit_details = command_audit_details(&command_name, &payload.args);
     let started = Instant::now();
+    let started_at = rcw_common::audit::now_rfc3339();
 
     println!(
         "[{}] {} started request={}",
-        rcw_common::audit::now_rfc3339(),
-        command_name,
-        request_id
+        started_at, command_name, request_id
     );
     record_task_started(
         context,
@@ -145,13 +152,14 @@ async fn execute_command_inline(
         &command_name,
         None,
     );
-    append_host_audit(
+    append_command_started_audit(
         context,
-        "command.started",
-        Some(request_id.clone()),
+        &request_id,
         session_id.clone(),
-        Some(command_name.clone()),
-        Some("started"),
+        &command_name,
+        audit_label.clone(),
+        &audit_details,
+        started_at,
     );
 
     let result = match payload.command.as_str() {
@@ -186,9 +194,11 @@ async fn execute_command_inline(
     let ok = result.is_ok();
     let status = task_status_for_result(ok, result.as_ref().err());
     let result_label = task_result_label(status);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let finished_at = rcw_common::audit::now_rfc3339();
     println!(
         "[{}] {} {} request={}",
-        rcw_common::audit::now_rfc3339(),
+        finished_at,
         command_name,
         if ok { "ok" } else { "failed" },
         request_id
@@ -200,18 +210,24 @@ async fn execute_command_inline(
             session_id: session_id.clone(),
             command: &command_name,
             status,
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms,
             result: result_label,
             bytes_transferred: None,
         },
     );
-    append_host_audit(
+    append_command_completed_audit(
         context,
-        "command.complete",
-        Some(request_id.clone()),
-        session_id.clone(),
-        Some(command_name),
-        Some(if ok { "ok" } else { "failed" }),
+        CommandCompleteAudit {
+            request_id: &request_id,
+            session_id: session_id.clone(),
+            command: &command_name,
+            audit_label,
+            details: &audit_details,
+            result: if ok { "ok" } else { "failed" },
+            duration_ms,
+            finished_at,
+            error: result.as_ref().err(),
+        },
     );
 
     if let Err(err) = &result {
@@ -244,6 +260,7 @@ fn spawn_async_command(
         .clone()
         .ok_or_else(|| anyhow!("command.request missing request_id"))?;
     let session_id = message.session_id.clone();
+    let command = payload.command.clone();
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let task_request_id = request_id.clone();
     let task_session_id = session_id.clone();
@@ -262,6 +279,7 @@ fn spawn_async_command(
         request_id,
         CommandTask {
             session_id,
+            command,
             cancel_tx,
             handle,
         },
@@ -279,12 +297,13 @@ async fn run_async_command_task(
 ) {
     let started = Instant::now();
     let command_name = payload.command.clone();
+    let audit_label = payload.audit_label.clone();
+    let audit_details = command_audit_details(&command_name, &payload.args);
+    let started_at = rcw_common::audit::now_rfc3339();
 
     println!(
         "[{}] {} started request={}",
-        rcw_common::audit::now_rfc3339(),
-        command_name,
-        request_id
+        started_at, command_name, request_id
     );
     record_task_started(
         &context,
@@ -293,13 +312,14 @@ async fn run_async_command_task(
         &command_name,
         None,
     );
-    append_host_audit(
+    append_command_started_audit(
         &context,
-        "command.started",
-        Some(request_id.clone()),
+        &request_id,
         session_id.clone(),
-        Some(command_name.clone()),
-        Some("started"),
+        &command_name,
+        audit_label.clone(),
+        &audit_details,
+        started_at,
     );
 
     let result = match payload.command.as_str() {
@@ -329,9 +349,11 @@ async fn run_async_command_task(
     let ok = result.is_ok();
     let status = task_status_for_result(ok, result.as_ref().err());
     let result_label = task_result_label(status);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let finished_at = rcw_common::audit::now_rfc3339();
     println!(
         "[{}] {} {} request={}",
-        rcw_common::audit::now_rfc3339(),
+        finished_at,
         command_name,
         if ok { "ok" } else { "failed" },
         request_id
@@ -343,18 +365,24 @@ async fn run_async_command_task(
             session_id: session_id.clone(),
             command: &command_name,
             status,
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms,
             result: result_label,
             bytes_transferred: None,
         },
     );
-    append_host_audit(
+    append_command_completed_audit(
         &context,
-        "command.complete",
-        Some(request_id.clone()),
-        session_id.clone(),
-        Some(command_name),
-        Some(if ok { "ok" } else { "failed" }),
+        CommandCompleteAudit {
+            request_id: &request_id,
+            session_id: session_id.clone(),
+            command: &command_name,
+            audit_label,
+            details: &audit_details,
+            result: if ok { "ok" } else { "failed" },
+            duration_ms,
+            finished_at,
+            error: result.as_ref().err(),
+        },
     );
 
     if let Err(err) = &result {
@@ -431,6 +459,18 @@ struct TaskCompletion<'a> {
     bytes_transferred: Option<u64>,
 }
 
+struct CommandCompleteAudit<'a> {
+    request_id: &'a str,
+    session_id: Option<String>,
+    command: &'a str,
+    audit_label: Option<String>,
+    details: &'a CommandAuditDetails,
+    result: &'a str,
+    duration_ms: u64,
+    finished_at: String,
+    error: Option<&'a anyhow::Error>,
+}
+
 fn record_task_completed(context: &HostContext, completion: TaskCompletion<'_>) {
     if completion.command == COMMAND_DOWNLOAD_BEGIN {
         context.state.record_transfer_completed(
@@ -460,6 +500,55 @@ fn task_result_label(status: HostTaskStatus) -> String {
         HostTaskStatus::Cancelled => "cancelled",
     }
     .to_owned()
+}
+
+fn append_command_started_audit(
+    context: &HostContext,
+    request_id: &str,
+    session_id: Option<String>,
+    command: &str,
+    audit_label: Option<String>,
+    details: &CommandAuditDetails,
+    started_at: String,
+) {
+    let mut record = HostAuditRecord::new(details.category, "command.started");
+    record.request_id = Some(request_id.to_owned());
+    record.session_id = session_id;
+    record.task_id = Some(request_id.to_owned());
+    record.command = Some(command.to_owned());
+    record.command_kind = Some(command.to_owned());
+    record.audit_label = audit_label;
+    record.result = Some("started".to_owned());
+    record.started_at = Some(started_at);
+    record.args_summary = details.args_summary.clone();
+    record.path_summary = details.path_summary.clone();
+    record.bytes = details.bytes;
+    record.size = details.size;
+    record.sha256 = details.sha256.clone();
+    append_host_audit_record(context, record);
+}
+
+fn append_command_completed_audit(context: &HostContext, audit: CommandCompleteAudit<'_>) {
+    let mut record = HostAuditRecord::new(audit.details.category, "command.complete");
+    record.request_id = Some(audit.request_id.to_owned());
+    record.session_id = audit.session_id;
+    record.task_id = Some(audit.request_id.to_owned());
+    record.command = Some(audit.command.to_owned());
+    record.command_kind = Some(audit.command.to_owned());
+    record.audit_label = audit.audit_label;
+    record.result = Some(audit.result.to_owned());
+    record.duration_ms = Some(audit.duration_ms);
+    record.finished_at = Some(audit.finished_at);
+    record.args_summary = audit.details.args_summary.clone();
+    record.path_summary = audit.details.path_summary.clone();
+    record.bytes = audit.details.bytes;
+    record.size = audit.details.size;
+    record.sha256 = audit.details.sha256.clone();
+    if let Some(error) = audit.error {
+        record.error_code = Some(format!("{:?}", error_code_for_command_error(error)));
+        record.error_message = Some(error.to_string());
+    }
+    append_host_audit_record(context, record);
 }
 
 async fn command_exec(

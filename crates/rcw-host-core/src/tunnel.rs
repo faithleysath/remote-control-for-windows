@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{anyhow, Result};
 use futures_util::SinkExt;
 use rcw_common::{
+    audit::AuditCategory,
     protocol::{
         ErrorCode, TunnelClosePayload, TunnelCloseResultPayload, TunnelDirection,
         TunnelEndpointSide, TunnelInfo, TunnelOpenPayload, TunnelOpenResultPayload, TunnelStatus,
@@ -22,7 +23,9 @@ use tokio::{
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    audit::append_host_audit,
+    audit::{
+        append_host_audit_record, sanitize_audit_text, tunnel_open_args_summary, HostAuditRecord,
+    },
     output::{send_error, send_json, SharedWsSink},
     HostContext,
 };
@@ -150,6 +153,20 @@ pub(crate) async fn handle_tunnel_open(
     let session_id = message.session_id.clone();
     let payload: TunnelOpenPayload = message.payload_as()?;
     let Some(tunnel_id) = payload.tunnel_id.clone() else {
+        append_tunnel_audit(
+            context,
+            TunnelAudit {
+                event: "tunnel.opened",
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                task_id: None,
+                command_kind: "tunnel.open",
+                result: "failed",
+                args_summary: Some(tunnel_open_args_summary(&payload)),
+                error_code: Some(format!("{:?}", ErrorCode::InternalError)),
+                error_message: Some("tunnel.open missing tunnel_id".to_owned()),
+            },
+        );
         send_shared_error(
             sink,
             request_id,
@@ -168,6 +185,20 @@ pub(crate) async fn handle_tunnel_open(
     let Ok(mut info) = result else {
         let reason = result.err().map(|err| err.to_string()).unwrap_or_default();
         let failed = failed_tunnel_info(&tunnel_id, session_id.clone(), &payload, reason.clone());
+        append_tunnel_audit(
+            context,
+            TunnelAudit {
+                event: "tunnel.opened",
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                task_id: Some(tunnel_id.clone()),
+                command_kind: "tunnel.open",
+                result: "failed",
+                args_summary: Some(tunnel_open_args_summary(&payload)),
+                error_code: Some(format!("{:?}", ErrorCode::InvalidPath)),
+                error_message: Some(reason),
+            },
+        );
         send_open_result(sink, request_id, session_id, false, failed).await?;
         return Ok(());
     };
@@ -179,6 +210,20 @@ pub(crate) async fn handle_tunnel_open(
             Err(err) => {
                 let failed =
                     failed_tunnel_info(&tunnel_id, session_id.clone(), &payload, err.to_string());
+                append_tunnel_audit(
+                    context,
+                    TunnelAudit {
+                        event: "tunnel.opened",
+                        request_id: request_id.clone(),
+                        session_id: session_id.clone(),
+                        task_id: Some(tunnel_id.clone()),
+                        command_kind: "tunnel.open",
+                        result: "failed",
+                        args_summary: Some(tunnel_open_args_summary(&payload)),
+                        error_code: Some(format!("{:?}", ErrorCode::InvalidPath)),
+                        error_message: Some(err.to_string()),
+                    },
+                );
                 send_open_result(sink, request_id, session_id, false, failed).await?;
                 return Ok(());
             }
@@ -211,13 +256,19 @@ pub(crate) async fn handle_tunnel_open(
         );
     }
 
-    append_host_audit(
+    append_tunnel_audit(
         context,
-        "tunnel.opened",
-        message.request_id.clone(),
-        session_id.clone(),
-        Some(format!("{:?}", payload.direction)),
-        Some("ok"),
+        TunnelAudit {
+            event: "tunnel.opened",
+            request_id: message.request_id.clone(),
+            session_id: session_id.clone(),
+            task_id: Some(tunnel_id),
+            command_kind: "tunnel.open",
+            result: "ok",
+            args_summary: Some(tunnel_open_args_summary(&payload)),
+            error_code: None,
+            error_message: None,
+        },
     );
     context.state.record_tunnel_opened(info.clone());
     send_open_result(sink, request_id, session_id, true, info).await
@@ -234,13 +285,19 @@ pub(crate) async fn handle_tunnel_close(
     let session_id = message.session_id.clone();
     let payload: TunnelClosePayload = message.payload_as()?;
     close_tunnel_locally(tunnels, streams, &payload.tunnel_id).await;
-    append_host_audit(
+    append_tunnel_audit(
         context,
-        "tunnel.closed",
-        message.request_id.clone(),
-        session_id.clone(),
-        Some(payload.tunnel_id.clone()),
-        Some("ok"),
+        TunnelAudit {
+            event: "tunnel.closed",
+            request_id: message.request_id.clone(),
+            session_id: session_id.clone(),
+            task_id: Some(payload.tunnel_id.clone()),
+            command_kind: "tunnel.close",
+            result: "ok",
+            args_summary: None,
+            error_code: None,
+            error_message: None,
+        },
     );
     context.state.record_tunnel_closed(
         payload.tunnel_id.clone(),
@@ -442,13 +499,22 @@ fn spawn_reverse_listener(
                         stream_id.clone(),
                         stream,
                     ).await;
-                    append_host_audit(
+                    append_tunnel_audit(
                         &context,
-                        "tunnel.stream_open",
-                        Some(stream_id),
-                        session_id.clone(),
-                        Some(tunnel_id.clone()),
-                        Some("started"),
+                        TunnelAudit {
+                            event: "tunnel.stream_open",
+                            request_id: Some(stream_id.clone()),
+                            session_id: session_id.clone(),
+                            task_id: Some(stream_id),
+                            command_kind: "tunnel.stream_open",
+                            result: "started",
+                            args_summary: Some(format!(
+                                "tunnel_id={}",
+                                sanitize_audit_text(&tunnel_id)
+                            )),
+                            error_code: None,
+                            error_message: None,
+                        },
                     );
                 }
                 changed = cancel_rx.changed() => {
@@ -527,13 +593,22 @@ async fn spawn_stream_pump(
                 }
             }
         }
-        append_host_audit(
+        append_tunnel_audit(
             &context,
-            "tunnel.stream_closed",
-            Some(task_stream_id),
-            task_session_id,
-            Some(task_tunnel_id),
-            Some("closed"),
+            TunnelAudit {
+                event: "tunnel.stream_closed",
+                request_id: Some(task_stream_id.clone()),
+                session_id: task_session_id,
+                task_id: Some(task_stream_id),
+                command_kind: "tunnel.stream_closed",
+                result: "closed",
+                args_summary: Some(format!(
+                    "tunnel_id={}",
+                    sanitize_audit_text(&task_tunnel_id)
+                )),
+                error_code: None,
+                error_message: None,
+            },
         );
     });
     let mut streams = streams.lock().await;
@@ -692,4 +767,30 @@ fn failed_tunnel_info(
 
 fn stream_key(tunnel_id: &str, stream_id: &str) -> String {
     format!("{tunnel_id}/{stream_id}")
+}
+
+struct TunnelAudit<'a> {
+    event: &'a str,
+    request_id: Option<String>,
+    session_id: Option<String>,
+    task_id: Option<String>,
+    command_kind: &'a str,
+    result: &'a str,
+    args_summary: Option<String>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+fn append_tunnel_audit(context: &HostContext, audit: TunnelAudit<'_>) {
+    let mut record = HostAuditRecord::new(AuditCategory::Tunnel, audit.event);
+    record.request_id = audit.request_id;
+    record.session_id = audit.session_id;
+    record.task_id = audit.task_id;
+    record.command = Some(audit.command_kind.to_owned());
+    record.command_kind = Some(audit.command_kind.to_owned());
+    record.result = Some(audit.result.to_owned());
+    record.args_summary = audit.args_summary;
+    record.error_code = audit.error_code;
+    record.error_message = audit.error_message;
+    append_host_audit_record(context, record);
 }

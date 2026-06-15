@@ -12,11 +12,25 @@ use crate::RcwResult;
 
 static AUDIT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditCategory {
+    Host,
+    Session,
+    Exec,
+    Transfer,
+    Tunnel,
+    Input,
+    Error,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub time: String,
     pub side: String,
     pub event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<AuditCategory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,13 +40,37 @@ pub struct AuditEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audit_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
@@ -43,14 +81,27 @@ impl AuditEvent {
             time: now_rfc3339(),
             side: side.into(),
             event: event.into(),
+            category: None,
             machine_id: None,
             host_id: None,
             session_id: None,
             request_id: None,
+            task_id: None,
             command: None,
+            command_kind: None,
             audit_label: None,
+            controller_label: None,
             result: None,
+            error_code: None,
+            error_message: None,
             duration_ms: None,
+            bytes: None,
+            size: None,
+            sha256: None,
+            started_at: None,
+            finished_at: None,
+            args_summary: None,
+            path_summary: None,
             summary: None,
         }
     }
@@ -117,5 +168,24 @@ mod tests {
             serde_json::from_str::<AuditEvent>(line).unwrap();
         }
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn audit_event_serializes_structured_optional_fields() {
+        let mut event = AuditEvent::new("host", "command.complete");
+        event.category = Some(AuditCategory::Exec);
+        event.request_id = Some("req".to_owned());
+        event.task_id = Some("task".to_owned());
+        event.command_kind = Some("exec".to_owned());
+        event.args_summary = Some("program=pwsh argv_count=2".to_owned());
+        event.error_code = Some("cancelled".to_owned());
+
+        let encoded = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(encoded["category"], "exec");
+        assert_eq!(encoded["task_id"], "task");
+        assert_eq!(encoded["command_kind"], "exec");
+        assert_eq!(encoded["args_summary"], "program=pwsh argv_count=2");
+        assert_eq!(encoded["error_code"], "cancelled");
     }
 }

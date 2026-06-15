@@ -112,9 +112,13 @@
 - 主机上线和下线。
 - 会话创建和关闭。
 - 命令类型。
-- 命令开始和结束时间。
+- 命令开始和结束时间、request ID、task ID 和 duration。
 - 命令是否成功。
-- 传输文件大小和哈希。
+- 传输文件大小、已传输字节数和哈希。
+- 文件路径 basename 或归一化路径摘要。
+- TCP tunnel 的方向、listen/target 端点摘要、tunnel ID 和 stream ID。
+- `exec` 的 program basename、argv 数量、timeout 和工作目录 basename。
+- `keyboard.type` 的字符数和字节数。
 - 当前被控端权限状态。
 - request ID 和 session ID。
 
@@ -125,7 +129,12 @@
 - TOTP seed。
 - 剪贴板完整内容。
 - 默认完整命令输出。
+- `keyboard.type` 输入全文。
+- 默认完整 `exec` argv 明文。
+- 默认完整用户文件路径。
 - 文件内容。
+
+任何 `token`、`password`、`passwd`、`secret`、`key`、`*_key` 等疑似敏感赋值字段都应写成 `[redacted]`。路径型字段默认只保留 basename；需要完整路径时应通过明确的后续授权流程临时采集，不能作为 host audit 的默认行为。
 
 如果任一端本地日志写入失败，该端必须输出 warning。被控端的日志写入失败 warning 必须实时显示在控制台。
 

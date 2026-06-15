@@ -158,7 +158,24 @@ curl https://remote.example.com/healthz
 - 控制端 Windows：`%APPDATA%\rcwctl\audit.jsonl`
 - 服务端：`./rcw-server-audit.jsonl` 或 `RCW_AUDIT_LOG`
 
-日志格式为 JSON Lines。每行是一条独立事件，包含 `time`、`side`、`host_id`、`machine_id`、`session_id`、`request_id`、`event`、`result` 等字段。
+日志格式为 JSON Lines。每行是一条独立事件，包含 `time`、`side`、`event`、`category`、`host_id`、`machine_id`、`session_id`、`request_id`、`task_id`、`command`、`command_kind`、`result`、`duration_ms`、`summary` 等字段。旧字段保持兼容，新增字段都是可选字段，旧版本 JSONL 仍可逐行读取。
+
+被控端 host audit 默认写结构化摘要，用于后续 GUI 时间线和本地 JSONL 共用：
+
+- `category`：`host`、`session`、`exec`、`transfer`、`tunnel`、`input` 或 `error`。
+- `controller_label` / `audit_label`：控制端身份说明和调用者提供的审计说明，写入前会折叠换行并截断。
+- `args_summary`：命令参数摘要。`exec` 只记录 program basename、argv 数量和 timeout，不记录 argv 明文。
+- `path_summary`：文件路径摘要，只记录 basename 或工作目录 basename，不记录完整用户目录。
+- `bytes` / `size` / `sha256`：输入长度、传输大小和传输校验哈希；不记录文件内容。
+- `started_at` / `finished_at`：长任务或可持续操作的开始/结束时间。
+- `error_code` / `error_message`：失败时的错误码和脱敏后的错误消息。
+
+脱敏规则：
+
+- `keyboard.type` 不记录输入全文，只记录字符数和字节数。
+- upload/download 只记录远端路径 basename、传输大小和 SHA-256，不记录完整路径或文件内容。
+- `token`、`password`、`passwd`、`secret`、`key`、`*_key` 等疑似敏感赋值会写成 `[redacted]`。
+- TCP tunnel 只记录 listen/target 端点摘要、tunnel id 和 stream id；不记录 TCP payload。
 
 被控端控制台必须同步显示审计摘要，不依赖日志文件打开成功。即使本地日志写入失败，也要继续把远控操作实时显示在控制台。
 

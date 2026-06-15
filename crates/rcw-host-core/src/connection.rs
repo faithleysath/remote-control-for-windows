@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use rcw_common::{
+    audit::AuditCategory,
     ids::{new_request_id, short_machine_id},
     protocol::{
         CommandRequestPayload, ErrorCode, ErrorPayload, HostAuthResultPayload, HostHelloPayload,
@@ -22,7 +23,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::warn;
 
 use crate::{
-    audit::append_host_audit,
+    audit::{append_host_audit, append_host_audit_record, category_for_command, HostAuditRecord},
     commands::{cancel_command_task, execute_command, prune_finished_command_tasks, CommandTasks},
     output::{close_shared_sink, send_error, send_json, shared_sink, SharedWsSink},
     platform,
@@ -226,6 +227,7 @@ async fn handle_server_message(
                 return Ok(());
             };
             let payload: rcw_common::protocol::HostAuthRequestPayload = message.payload_as()?;
+            let controller_label = payload.controller_label.clone();
             let ok = totp::verify_code(
                 &payload.totp,
                 &context.totp_seed,
@@ -251,35 +253,32 @@ async fn handle_server_message(
             context
                 .state
                 .record_auth_request(request_id.clone(), payload.controller_label, ok);
-            append_host_audit(
-                context,
-                "session.auth",
-                Some(request_id),
-                None,
-                None,
-                Some(if ok { "ok" } else { "failed" }),
-            );
+            let mut record = HostAuditRecord::new(AuditCategory::Session, "session.auth");
+            record.request_id = Some(request_id);
+            record.controller_label = Some(controller_label);
+            record.result = Some(if ok { "ok" } else { "failed" }.to_owned());
+            append_host_audit_record(context, record);
         }
         TYPE_HOST_SESSION_OPENED => {
             let payload: HostSessionOpenedPayload = message.payload_as()?;
             *runtime.active_session = Some(payload.session_id.clone());
             println!("Session: active");
             println!("Controller: {}", payload.controller_label);
+            let controller_label = payload.controller_label.clone();
             context
                 .state
                 .record_session_opened(payload.session_id.clone(), payload.controller_label);
-            append_host_audit(
-                context,
-                "session.opened",
-                message.request_id,
-                Some(payload.session_id),
-                None,
-                Some("ok"),
-            );
+            let mut record = HostAuditRecord::new(AuditCategory::Session, "session.opened");
+            record.request_id = message.request_id;
+            record.session_id = Some(payload.session_id);
+            record.controller_label = Some(controller_label);
+            record.result = Some("ok".to_owned());
+            append_host_audit_record(context, record);
         }
         TYPE_HOST_SESSION_CLOSED => {
             let payload: HostSessionClosedPayload = message.payload_as()?;
             let session_id = payload.session_id.clone();
+            let reason = payload.reason.clone();
             println!("Session: closed ({})", payload.reason);
             *runtime.active_session = None;
             context
@@ -289,14 +288,12 @@ async fn handle_server_message(
             cancel_command_tasks_for_session(runtime.command_tasks, &session_id);
             remove_tunnels_for_session(runtime.tunnel_tasks, &session_id);
             abort_tunnel_streams_for_session(runtime.tunnel_streams, &session_id).await;
-            append_host_audit(
-                context,
-                "session.closed",
-                message.request_id,
-                Some(payload.session_id),
-                None,
-                Some("ok"),
-            );
+            let mut record = HostAuditRecord::new(AuditCategory::Session, "session.closed");
+            record.request_id = message.request_id;
+            record.session_id = Some(payload.session_id);
+            record.result = Some("ok".to_owned());
+            record.summary = Some(reason);
+            append_host_audit_record(context, record);
         }
         TYPE_HOST_SESSION_CLOSE_RESULT => {
             let payload: HostSessionCloseResultPayload = message.payload_as()?;
@@ -341,10 +338,19 @@ async fn handle_server_message(
         }
         TYPE_COMMAND_CANCEL => {
             if let Some(request_id) = &message.request_id {
-                if runtime.uploads.remove(request_id).is_some() {
+                if let Some(upload) = runtime.uploads.remove(request_id) {
                     context
                         .state
-                        .record_cancel_requested(request_id.clone(), message.session_id.clone());
+                        .record_cancel_requested(request_id.clone(), upload.session_id.clone());
+                    let mut record =
+                        HostAuditRecord::new(AuditCategory::Transfer, "command.cancel");
+                    record.request_id = Some(request_id.clone());
+                    record.session_id = upload.session_id.clone();
+                    record.task_id = Some(request_id.clone());
+                    record.command = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+                    record.command_kind = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+                    record.result = Some("requested".to_owned());
+                    append_host_audit_record(context, record);
                 }
             }
             cancel_command_task(context, sink, runtime.command_tasks, message).await?;
@@ -419,14 +425,13 @@ async fn handle_host_control_request(
                     runtime.active_session.clone(),
                     Some("host_close".to_owned()),
                 );
-                append_host_audit(
-                    context,
-                    "tunnel.closed",
-                    None,
-                    runtime.active_session.clone(),
-                    Some(tunnel_id.clone()),
-                    Some("host_close"),
-                );
+                let mut record = HostAuditRecord::new(AuditCategory::Tunnel, "tunnel.closed");
+                record.session_id = runtime.active_session.clone();
+                record.task_id = Some(tunnel_id.clone());
+                record.command = Some("tunnel.close".to_owned());
+                record.command_kind = Some("tunnel.close".to_owned());
+                record.result = Some("host_close".to_owned());
+                append_host_audit_record(context, record);
             }
             let _ = respond.send(Ok(HostTunnelControlOutcome { closed, tunnel_id }));
             Ok(())
@@ -435,7 +440,7 @@ async fn handle_host_control_request(
 }
 
 async fn close_current_session(
-    _context: &HostContext,
+    context: &HostContext,
     sink: &SharedWsSink,
     runtime: HostRuntime<'_>,
     reason: String,
@@ -449,6 +454,12 @@ async fn close_current_session(
         return Ok(());
     };
     let request_id = new_request_id();
+    let mut record = HostAuditRecord::new(AuditCategory::Session, "session.close_requested");
+    record.request_id = Some(request_id.clone());
+    record.session_id = Some(session_id.clone());
+    record.result = Some("requested".to_owned());
+    record.summary = Some(reason.clone());
+    append_host_audit_record(context, record);
     let close = WireMessage::new(
         TYPE_HOST_SESSION_CLOSE,
         Some(request_id.clone()),
@@ -480,14 +491,14 @@ async fn cancel_local_task(
         context
             .state
             .record_cancel_requested(request_id.to_owned(), upload.session_id.clone());
-        append_host_audit(
-            context,
-            "command.cancel",
-            Some(request_id.to_owned()),
-            upload.session_id.clone(),
-            Some(COMMAND_UPLOAD_BEGIN.to_owned()),
-            Some("host_requested"),
-        );
+        let mut record = HostAuditRecord::new(AuditCategory::Transfer, "command.cancel");
+        record.request_id = Some(request_id.to_owned());
+        record.session_id = upload.session_id.clone();
+        record.task_id = Some(request_id.to_owned());
+        record.command = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+        record.command_kind = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+        record.result = Some("host_requested".to_owned());
+        append_host_audit_record(context, record);
         let mut sink = sink.lock().await;
         send_error(
             &mut sink,
@@ -504,14 +515,15 @@ async fn cancel_local_task(
         context
             .state
             .record_cancel_requested(request_id.to_owned(), task.session_id.clone());
-        append_host_audit(
-            context,
-            "command.cancel",
-            Some(request_id.to_owned()),
-            task.session_id.clone(),
-            None,
-            Some("host_requested"),
-        );
+        let mut record =
+            HostAuditRecord::new(category_for_command(&task.command), "command.cancel");
+        record.request_id = Some(request_id.to_owned());
+        record.session_id = task.session_id.clone();
+        record.task_id = Some(request_id.to_owned());
+        record.command = Some(task.command.clone());
+        record.command_kind = Some(task.command.clone());
+        record.result = Some("host_requested".to_owned());
+        append_host_audit_record(context, record);
         requested = true;
     }
     Ok(requested)

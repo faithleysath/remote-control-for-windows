@@ -20,7 +20,7 @@ use rcw_common::{
 use tracing::warn;
 
 use crate::{
-    audit::append_host_audit,
+    audit::{append_host_audit_record, upload_audit_details, CommandAuditDetails, HostAuditRecord},
     output::{send_complete_kind, send_error, WsSink},
     HostContext, HostTaskStatus, HostTransferDirection,
 };
@@ -70,13 +70,19 @@ pub(crate) fn begin_upload(
         rcw_common::audit::now_rfc3339(),
         request_id
     );
-    append_host_audit(
+    let details = upload_audit_details(&args);
+    append_upload_audit(
         context,
-        "command.started",
-        Some(request_id.clone()),
-        message.session_id.clone(),
-        Some(payload.command),
-        Some("started"),
+        UploadAudit {
+            event: "command.started",
+            request_id: &request_id,
+            session_id: message.session_id.clone(),
+            command: Some(payload.command.clone()),
+            details: &details,
+            result: "started",
+            error_code: None,
+            error_message: None,
+        },
     );
     context.state.record_transfer_started(
         request_id.clone(),
@@ -178,6 +184,22 @@ pub(crate) async fn handle_binary_frame(
             None,
             "failed".to_owned(),
         );
+        let mut details =
+            CommandAuditDetails::new(crate::audit::category_for_command(COMMAND_UPLOAD_BEGIN));
+        details.args_summary = Some("upload chunk rejected".to_owned());
+        append_upload_audit(
+            context,
+            UploadAudit {
+                event: "command.complete",
+                request_id: &request_id,
+                session_id: session_id.clone(),
+                command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                details: &details,
+                result: "failed",
+                error_code: Some(format!("{code:?}")),
+                error_message: Some(message.clone()),
+            },
+        );
         send_error(sink, Some(request_id), session_id, code, &message).await?;
         return Ok(());
     }
@@ -213,12 +235,26 @@ async fn finalize_upload(
         file.flush()?;
     }
     if state.bytes_written != state.args.size {
+        let details = upload_audit_details(&state.args);
         context.state.record_transfer_completed(
             request_id.to_owned(),
             state.session_id.clone(),
             HostTaskStatus::Failed,
             Some(state.bytes_written),
             "size_mismatch".to_owned(),
+        );
+        append_upload_audit(
+            context,
+            UploadAudit {
+                event: "command.complete",
+                request_id,
+                session_id: state.session_id.clone(),
+                command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                details: &details,
+                result: "failed",
+                error_code: Some(format!("{:?}", ErrorCode::ChecksumMismatch)),
+                error_message: Some("upload size mismatch".to_owned()),
+            },
         );
         send_error(
             sink,
@@ -232,12 +268,26 @@ async fn finalize_upload(
     }
     let actual = std::mem::replace(&mut state.hasher, Sha256Accumulator::new()).finalize();
     if actual != state.args.sha256 {
+        let details = upload_audit_details(&state.args);
         context.state.record_transfer_completed(
             request_id.to_owned(),
             state.session_id.clone(),
             HostTaskStatus::Failed,
             Some(state.bytes_written),
             "checksum_mismatch".to_owned(),
+        );
+        append_upload_audit(
+            context,
+            UploadAudit {
+                event: "command.complete",
+                request_id,
+                session_id: state.session_id.clone(),
+                command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+                details: &details,
+                result: "failed",
+                error_code: Some(format!("{:?}", ErrorCode::ChecksumMismatch)),
+                error_message: Some(ErrorCode::ChecksumMismatch.message().to_owned()),
+            },
         );
         send_error(
             sink,
@@ -276,15 +326,50 @@ async fn finalize_upload(
         Some(state.bytes_written),
         "ok".to_owned(),
     );
-    append_host_audit(
+    let details = upload_audit_details(&state.args);
+    append_upload_audit(
         context,
-        "command.complete",
-        Some(request_id.to_owned()),
-        state.session_id.clone(),
-        Some(COMMAND_UPLOAD_BEGIN.to_owned()),
-        Some("ok"),
+        UploadAudit {
+            event: "command.complete",
+            request_id,
+            session_id: state.session_id.clone(),
+            command: Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+            details: &details,
+            result: "ok",
+            error_code: None,
+            error_message: None,
+        },
     );
     Ok(())
+}
+
+struct UploadAudit<'a> {
+    event: &'a str,
+    request_id: &'a str,
+    session_id: Option<String>,
+    command: Option<String>,
+    details: &'a CommandAuditDetails,
+    result: &'a str,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+fn append_upload_audit(context: &HostContext, audit: UploadAudit<'_>) {
+    let mut record = HostAuditRecord::new(audit.details.category, audit.event);
+    record.request_id = Some(audit.request_id.to_owned());
+    record.session_id = audit.session_id;
+    record.task_id = Some(audit.request_id.to_owned());
+    record.command = audit.command;
+    record.command_kind = Some(COMMAND_UPLOAD_BEGIN.to_owned());
+    record.result = Some(audit.result.to_owned());
+    record.error_code = audit.error_code;
+    record.error_message = audit.error_message;
+    record.args_summary = audit.details.args_summary.clone();
+    record.path_summary = audit.details.path_summary.clone();
+    record.bytes = audit.details.bytes;
+    record.size = audit.details.size;
+    record.sha256 = audit.details.sha256.clone();
+    append_host_audit_record(context, record);
 }
 
 pub(crate) fn remove_uploads_for_session(
