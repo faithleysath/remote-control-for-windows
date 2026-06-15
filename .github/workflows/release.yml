@@ -204,6 +204,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
+      - name: Install Windows resource compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          if ! command -v llvm-rc >/dev/null 2>&1; then
+            llvm_rc="$(command -v llvm-rc-18 || command -v llvm-rc-19 || true)"
+            if [ -z "$llvm_rc" ]; then
+              echo "llvm-rc not found after installing llvm" >&2
+              exit 1
+            fi
+            sudo ln -s "$llvm_rc" /usr/local/bin/llvm-rc
+          fi
+          llvm-rc --version
       - name: Install cargo-xwin
         run: cargo install cargo-xwin --locked
       - name: Install host GUI frontend dependencies

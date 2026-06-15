@@ -49,9 +49,10 @@ git push origin v0.1.9
 
 5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
 6. 确认发布产物不需要任何 secret 或本地配置文件。
-7. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
-8. 确认 `npm/package.json` 和 `npm/packages/*/package.json` 的版本号与 tag 去掉 `v` 后一致。
-9. 在 npmjs.com 上为这 7 个 npm 包分别配置 GitHub Actions trusted publisher，工作流文件使用 `.github/workflows/release.yml`，允许 `npm publish`。发布流程不再依赖 `NPM_TOKEN` secret。
+7. 确认 Linux builder 上存在 `llvm-rc`；Tauri Windows GUI 构建需要它生成 Windows resource。
+8. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
+9. 确认 `npm/package.json` 和 `npm/packages/*/package.json` 的版本号与 tag 去掉 `v` 后一致。
+10. 在 npmjs.com 上为这 7 个 npm 包分别配置 GitHub Actions trusted publisher，工作流文件使用 `.github/workflows/release.yml`，允许 `npm publish`。发布流程不再依赖 `NPM_TOKEN` secret。
 
 ## 目标平台
 
