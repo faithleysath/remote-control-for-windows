@@ -12,14 +12,15 @@ use rcw_common::{
     protocol::{
         CommandCompletePayload, CommandOutputPayload, ControlOpenResultPayload, ErrorCode,
         ErrorPayload, HostAuthResultPayload, HostHelloAckPayload, HostHelloPayload,
-        HostSessionClosedPayload, HostSessionOpenedPayload, TunnelCloseResultPayload,
-        TunnelOpenResultPayload, TunnelStreamControlPayload, TunnelStreamOpenPayload,
-        TunnelStreamOpenResultPayload, WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE,
-        TYPE_COMMAND_OUTPUT, TYPE_CONTROL_OPEN_RESULT, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR,
-        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSED,
-        TYPE_HOST_SESSION_OPENED, TYPE_TUNNEL_CLOSE_RESULT, TYPE_TUNNEL_OPEN_RESULT,
-        TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN, TYPE_TUNNEL_STREAM_OPEN_RESULT,
-        TYPE_TUNNEL_STREAM_RESET, TYPE_UPLOAD_COMPLETE,
+        HostSessionClosePayload, HostSessionCloseResultPayload, HostSessionClosedPayload,
+        HostSessionOpenedPayload, TunnelCloseResultPayload, TunnelOpenResultPayload,
+        TunnelStreamControlPayload, TunnelStreamOpenPayload, TunnelStreamOpenResultPayload,
+        WireMessage, PROTOCOL_VERSION, TYPE_COMMAND_COMPLETE, TYPE_COMMAND_OUTPUT,
+        TYPE_CONTROL_OPEN_RESULT, TYPE_DOWNLOAD_COMPLETE, TYPE_ERROR, TYPE_HOST_AUTH_RESULT,
+        TYPE_HOST_HELLO, TYPE_HOST_HELLO_ACK, TYPE_HOST_SESSION_CLOSE, TYPE_HOST_SESSION_CLOSED,
+        TYPE_HOST_SESSION_CLOSE_RESULT, TYPE_HOST_SESSION_OPENED, TYPE_TUNNEL_CLOSE_RESULT,
+        TYPE_TUNNEL_OPEN_RESULT, TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN,
+        TYPE_TUNNEL_STREAM_OPEN_RESULT, TYPE_TUNNEL_STREAM_RESET, TYPE_UPLOAD_COMPLETE,
     },
     transfer::{BinaryFrame, BinaryKind, TunnelDataFrame},
 };
@@ -241,6 +242,9 @@ async fn handle_host_message(
         TYPE_HOST_AUTH_RESULT => {
             handle_host_auth_result(state, host_id, connection_id, message).await
         }
+        TYPE_HOST_SESSION_CLOSE => {
+            handle_host_session_close(state, host_id, connection_id, message).await
+        }
         TYPE_COMMAND_OUTPUT
         | TYPE_COMMAND_COMPLETE
         | TYPE_UPLOAD_COMPLETE
@@ -281,6 +285,137 @@ async fn handle_host_message(
             .await
         }
         other => debug!("ignored host message type {other} from {host_id}"),
+    }
+}
+
+async fn handle_host_session_close(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    message: WireMessage,
+) {
+    let request_id = message.request_id.clone();
+    let payload = match message.payload_as::<HostSessionClosePayload>() {
+        Ok(payload) => payload,
+        Err(err) => {
+            send_error_to_host(
+                state,
+                host_id,
+                connection_id,
+                request_id,
+                message.session_id,
+                ErrorCode::InternalError,
+                &format!("invalid host.session_close payload: {err}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let session_id = message
+        .session_id
+        .clone()
+        .unwrap_or_else(|| payload.session_id.clone());
+    if session_id != payload.session_id {
+        send_error_to_host(
+            state,
+            host_id,
+            connection_id,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            "host.session_close session_id mismatch",
+        )
+        .await;
+        return;
+    }
+
+    let session = state
+        .inner
+        .remove_session_for_host(
+            &session_id,
+            host_id,
+            connection_id,
+            ErrorPayload {
+                code: ErrorCode::Cancelled,
+                message: "session closed by host".to_owned(),
+            },
+        )
+        .await;
+    let Some(session) = session else {
+        send_error_to_host(
+            state,
+            host_id,
+            connection_id,
+            request_id,
+            Some(session_id),
+            ErrorCode::SessionExpired,
+            ErrorCode::SessionExpired.message(),
+        )
+        .await;
+        return;
+    };
+
+    let closed = WireMessage::new(
+        TYPE_HOST_SESSION_CLOSED,
+        request_id.clone(),
+        Some(session.session_id.clone()),
+        HostSessionClosedPayload {
+            session_id: session.session_id.clone(),
+            reason: payload.reason.clone(),
+        },
+    )
+    .expect("session closed serializes");
+    if let Some(host_tx) = state.inner.host_tx(host_id, connection_id).await {
+        send_text(&host_tx, closed.clone());
+        let result = WireMessage::new(
+            TYPE_HOST_SESSION_CLOSE_RESULT,
+            request_id.clone(),
+            Some(session.session_id.clone()),
+            HostSessionCloseResultPayload {
+                ok: true,
+                session_id: session.session_id.clone(),
+            },
+        )
+        .expect("host session close result serializes");
+        send_text(&host_tx, result);
+    }
+
+    if let Some(controller_tx) = session.controller_tx {
+        send_text(&controller_tx, closed);
+        send_error(
+            &controller_tx,
+            request_id.clone(),
+            Some(session.session_id.clone()),
+            ErrorCode::Cancelled,
+            "session closed by host",
+        );
+    }
+
+    audit(
+        state,
+        AuditEvent {
+            machine_id: Some(session.machine_id),
+            host_id: Some(session.host_id),
+            session_id: Some(session.session_id),
+            request_id,
+            result: Some("closed".to_owned()),
+            summary: Some(payload.reason),
+            ..AuditEvent::new("server", "session.closed")
+        },
+    );
+}
+
+async fn send_error_to_host(
+    state: &AppState,
+    host_id: &str,
+    connection_id: &str,
+    request_id: Option<String>,
+    session_id: Option<String>,
+    code: ErrorCode,
+    message: &str,
+) {
+    if let Some(host_tx) = state.inner.host_tx(host_id, connection_id).await {
+        send_error(&host_tx, request_id, session_id, code, message);
     }
 }
 

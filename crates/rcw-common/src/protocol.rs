@@ -4,13 +4,15 @@ use serde_json::{json, Value};
 
 use crate::RcwResult;
 
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 pub const TYPE_HOST_HELLO: &str = "host.hello";
 pub const TYPE_HOST_HELLO_ACK: &str = "host.hello_ack";
 pub const TYPE_HOST_AUTH_REQUEST: &str = "host.auth_request";
 pub const TYPE_HOST_AUTH_RESULT: &str = "host.auth_result";
 pub const TYPE_HOST_SESSION_OPENED: &str = "host.session_opened";
+pub const TYPE_HOST_SESSION_CLOSE: &str = "host.session_close";
+pub const TYPE_HOST_SESSION_CLOSE_RESULT: &str = "host.session_close_result";
 pub const TYPE_HOST_SESSION_CLOSED: &str = "host.session_closed";
 pub const TYPE_CONTROL_OPEN: &str = "control.open";
 pub const TYPE_CONTROL_OPEN_RESULT: &str = "control.open_result";
@@ -162,6 +164,18 @@ pub struct HostSessionOpenedPayload {
 pub struct HostSessionClosedPayload {
     pub session_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSessionClosePayload {
+    pub session_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSessionCloseResultPayload {
+    pub ok: bool,
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -587,7 +601,43 @@ mod tests {
 
     #[test]
     fn protocol_version_marks_host_identity_routing() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
+
+    #[test]
+    fn host_session_close_payload_round_trips() {
+        let message = WireMessage::new(
+            TYPE_HOST_SESSION_CLOSE,
+            Some("req".to_owned()),
+            Some("sess".to_owned()),
+            HostSessionClosePayload {
+                session_id: "sess".to_owned(),
+                reason: "host_close".to_owned(),
+            },
+        )
+        .unwrap();
+        let payload: HostSessionClosePayload = message.payload_as().unwrap();
+
+        assert_eq!(payload.session_id, "sess");
+        assert_eq!(payload.reason, "host_close");
+    }
+
+    #[test]
+    fn host_session_close_result_payload_round_trips() {
+        let message = WireMessage::new(
+            TYPE_HOST_SESSION_CLOSE_RESULT,
+            Some("req".to_owned()),
+            Some("sess".to_owned()),
+            HostSessionCloseResultPayload {
+                ok: true,
+                session_id: "sess".to_owned(),
+            },
+        )
+        .unwrap();
+        let payload: HostSessionCloseResultPayload = message.payload_as().unwrap();
+
+        assert!(payload.ok);
+        assert_eq!(payload.session_id, "sess");
     }
 
     #[test]

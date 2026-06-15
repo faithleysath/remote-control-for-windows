@@ -3,19 +3,21 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use rcw_common::{
-    ids::short_machine_id,
+    ids::{new_request_id, short_machine_id},
     protocol::{
-        CommandRequestPayload, ErrorCode, HostAuthResultPayload, HostHelloPayload,
-        HostSessionClosedPayload, HostSessionOpenedPayload, WireMessage, COMMAND_UPLOAD_BEGIN,
-        PROTOCOL_VERSION, TYPE_COMMAND_CANCEL, TYPE_COMMAND_REQUEST, TYPE_HOST_AUTH_REQUEST,
-        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_SESSION_CLOSED, TYPE_HOST_SESSION_OPENED,
-        TYPE_TUNNEL_CLOSE, TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN,
-        TYPE_TUNNEL_STREAM_OPEN_RESULT, TYPE_TUNNEL_STREAM_RESET,
+        CommandRequestPayload, ErrorCode, ErrorPayload, HostAuthResultPayload, HostHelloPayload,
+        HostSessionClosePayload, HostSessionCloseResultPayload, HostSessionClosedPayload,
+        HostSessionOpenedPayload, WireMessage, COMMAND_UPLOAD_BEGIN, PROTOCOL_VERSION,
+        TYPE_COMMAND_CANCEL, TYPE_COMMAND_REQUEST, TYPE_ERROR, TYPE_HOST_AUTH_REQUEST,
+        TYPE_HOST_AUTH_RESULT, TYPE_HOST_HELLO, TYPE_HOST_SESSION_CLOSE, TYPE_HOST_SESSION_CLOSED,
+        TYPE_HOST_SESSION_CLOSE_RESULT, TYPE_HOST_SESSION_OPENED, TYPE_TUNNEL_CLOSE,
+        TYPE_TUNNEL_STREAM_EOF, TYPE_TUNNEL_STREAM_OPEN, TYPE_TUNNEL_STREAM_OPEN_RESULT,
+        TYPE_TUNNEL_STREAM_RESET,
     },
     totp,
     transfer::{BinaryFrame, BinaryKind},
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::warn;
 
@@ -26,16 +28,17 @@ use crate::{
     platform,
     tunnel::{
         abort_tunnel_streams, abort_tunnel_streams_for_session, abort_tunnel_tasks,
-        handle_tunnel_close, handle_tunnel_data, handle_tunnel_open, handle_tunnel_stream_eof,
-        handle_tunnel_stream_open, handle_tunnel_stream_open_result, handle_tunnel_stream_reset,
-        new_tunnel_streams, prune_finished_tunnel_tasks, remove_tunnels_for_session,
-        HostTunnelTasks,
+        close_tunnel_locally, handle_tunnel_close, handle_tunnel_data, handle_tunnel_open,
+        handle_tunnel_stream_eof, handle_tunnel_stream_open, handle_tunnel_stream_open_result,
+        handle_tunnel_stream_reset, new_tunnel_streams, prune_finished_tunnel_tasks,
+        remove_tunnels_for_session, HostTunnelTasks,
     },
     upload::{
         begin_upload, handle_binary_frame, prune_idle_uploads, remove_uploads_for_session,
         UploadState, UPLOAD_SWEEP_INTERVAL,
     },
-    HostContext,
+    HostContext, HostControlRequest, HostControlResult, HostSessionControlOutcome,
+    HostTaskControlOutcome, HostTaskStatus, HostTunnelControlOutcome,
 };
 
 struct HostRuntime<'a> {
@@ -44,12 +47,15 @@ struct HostRuntime<'a> {
     command_tasks: &'a mut CommandTasks,
     tunnel_tasks: &'a mut HostTunnelTasks,
     tunnel_streams: &'a crate::tunnel::HostTunnelStreams,
+    pending_session_closes:
+        &'a mut HashMap<String, oneshot::Sender<HostControlResult<HostSessionControlOutcome>>>,
 }
 
 pub(crate) async fn run_host_connection(
     context: Arc<HostContext>,
     ws_url: String,
     mut shutdown: watch::Receiver<bool>,
+    mut control_rx: Option<mpsc::Receiver<HostControlRequest>>,
 ) -> Result<()> {
     let (ws, _) = connect_async(ws_url)
         .await
@@ -85,6 +91,10 @@ pub(crate) async fn run_host_connection(
     let mut uploads: HashMap<String, UploadState> = HashMap::new();
     let mut command_tasks = CommandTasks::new();
     let mut tunnel_tasks: HostTunnelTasks = HashMap::new();
+    let mut pending_session_closes: HashMap<
+        String,
+        oneshot::Sender<HostControlResult<HostSessionControlOutcome>>,
+    > = HashMap::new();
     let tunnel_streams = new_tunnel_streams();
     let mut upload_sweep = tokio::time::interval(UPLOAD_SWEEP_INTERVAL);
     println!("Connection: connected");
@@ -115,6 +125,7 @@ pub(crate) async fn run_host_connection(
                                 command_tasks: &mut command_tasks,
                                 tunnel_tasks: &mut tunnel_tasks,
                                 tunnel_streams: &tunnel_streams,
+                                pending_session_closes: &mut pending_session_closes,
                             },
                             message,
                         )
@@ -143,9 +154,33 @@ pub(crate) async fn run_host_connection(
                 prune_finished_command_tasks(&mut command_tasks);
                 prune_finished_tunnel_tasks(&mut tunnel_tasks);
             }
+            maybe_control = async {
+                match control_rx.as_mut() {
+                    Some(control_rx) => control_rx.recv().await,
+                    None => std::future::pending::<Option<HostControlRequest>>().await,
+                }
+            } => {
+                if let Some(request) = maybe_control {
+                    handle_host_control_request(
+                        &context,
+                        &sink,
+                        HostRuntime {
+                            active_session: &mut active_session,
+                            uploads: &mut uploads,
+                            command_tasks: &mut command_tasks,
+                            tunnel_tasks: &mut tunnel_tasks,
+                            tunnel_streams: &tunnel_streams,
+                            pending_session_closes: &mut pending_session_closes,
+                        },
+                        request,
+                    )
+                    .await?;
+                }
+            }
             changed = shutdown.changed() => {
                 if changed.is_ok() && *shutdown.borrow() {
-                    abort_command_tasks(&mut command_tasks);
+                    abort_command_tasks(&context, &mut command_tasks);
+                    abort_uploads(&context, &mut uploads);
                     abort_tunnel_tasks(&mut tunnel_tasks);
                     abort_tunnel_streams(&tunnel_streams).await;
                     close_shared_sink(&sink).await;
@@ -168,6 +203,11 @@ pub(crate) async fn run_host_connection(
         None,
         Some("ok"),
     );
+    for (_, respond) in pending_session_closes.drain() {
+        let _ = respond.send(Err(
+            "host disconnected before session close completed".to_owned()
+        ));
+    }
     Ok(())
 }
 
@@ -258,6 +298,29 @@ async fn handle_server_message(
                 Some("ok"),
             );
         }
+        TYPE_HOST_SESSION_CLOSE_RESULT => {
+            let payload: HostSessionCloseResultPayload = message.payload_as()?;
+            if let Some(request_id) = message.request_id {
+                if let Some(respond) = runtime.pending_session_closes.remove(&request_id) {
+                    let _ = respond.send(Ok(HostSessionControlOutcome {
+                        closed: payload.ok,
+                        session_id: Some(payload.session_id),
+                    }));
+                }
+            }
+        }
+        TYPE_ERROR => {
+            if let Some(request_id) = &message.request_id {
+                if let Some(respond) = runtime.pending_session_closes.remove(request_id) {
+                    let error = message.payload_as::<ErrorPayload>().ok();
+                    let message = error
+                        .map(|error| format!("{:?}: {}", error.code, error.message))
+                        .unwrap_or_else(|| "host control request failed".to_owned());
+                    let _ = respond.send(Err(message));
+                    return Ok(());
+                }
+            }
+        }
         TYPE_COMMAND_REQUEST => {
             let payload: CommandRequestPayload = message.payload_as()?;
             if payload.command == COMMAND_UPLOAD_BEGIN {
@@ -325,6 +388,135 @@ async fn handle_server_message(
     Ok(())
 }
 
+async fn handle_host_control_request(
+    context: &HostContext,
+    sink: &SharedWsSink,
+    runtime: HostRuntime<'_>,
+    request: HostControlRequest,
+) -> Result<()> {
+    match request {
+        HostControlRequest::CloseCurrentSession { reason, respond } => {
+            close_current_session(context, sink, runtime, reason, respond).await
+        }
+        HostControlRequest::CancelTask {
+            request_id,
+            respond,
+        } => {
+            let requested = cancel_local_task(context, sink, runtime, &request_id).await?;
+            let _ = respond.send(Ok(HostTaskControlOutcome {
+                requested,
+                request_id,
+            }));
+            Ok(())
+        }
+        HostControlRequest::CloseTunnel { tunnel_id, respond } => {
+            let closed =
+                close_tunnel_locally(runtime.tunnel_tasks, runtime.tunnel_streams, &tunnel_id)
+                    .await;
+            if closed {
+                context.state.record_tunnel_closed(
+                    tunnel_id.clone(),
+                    runtime.active_session.clone(),
+                    Some("host_close".to_owned()),
+                );
+                append_host_audit(
+                    context,
+                    "tunnel.closed",
+                    None,
+                    runtime.active_session.clone(),
+                    Some(tunnel_id.clone()),
+                    Some("host_close"),
+                );
+            }
+            let _ = respond.send(Ok(HostTunnelControlOutcome { closed, tunnel_id }));
+            Ok(())
+        }
+    }
+}
+
+async fn close_current_session(
+    _context: &HostContext,
+    sink: &SharedWsSink,
+    runtime: HostRuntime<'_>,
+    reason: String,
+    respond: oneshot::Sender<HostControlResult<HostSessionControlOutcome>>,
+) -> Result<()> {
+    let Some(session_id) = runtime.active_session.clone() else {
+        let _ = respond.send(Ok(HostSessionControlOutcome {
+            closed: false,
+            session_id: None,
+        }));
+        return Ok(());
+    };
+    let request_id = new_request_id();
+    let close = WireMessage::new(
+        TYPE_HOST_SESSION_CLOSE,
+        Some(request_id.clone()),
+        Some(session_id.clone()),
+        HostSessionClosePayload {
+            session_id: session_id.clone(),
+            reason,
+        },
+    )?;
+    {
+        let mut sink = sink.lock().await;
+        if let Err(err) = send_json(&mut sink, close).await {
+            let _ = respond.send(Err(err.to_string()));
+            return Err(err);
+        }
+    }
+    runtime.pending_session_closes.insert(request_id, respond);
+    Ok(())
+}
+
+async fn cancel_local_task(
+    context: &HostContext,
+    sink: &SharedWsSink,
+    runtime: HostRuntime<'_>,
+    request_id: &str,
+) -> Result<bool> {
+    let mut requested = false;
+    if let Some(upload) = runtime.uploads.remove(request_id) {
+        context
+            .state
+            .record_cancel_requested(request_id.to_owned(), upload.session_id.clone());
+        append_host_audit(
+            context,
+            "command.cancel",
+            Some(request_id.to_owned()),
+            upload.session_id.clone(),
+            Some(COMMAND_UPLOAD_BEGIN.to_owned()),
+            Some("host_requested"),
+        );
+        let mut sink = sink.lock().await;
+        send_error(
+            &mut sink,
+            Some(request_id.to_owned()),
+            upload.session_id.clone(),
+            ErrorCode::Cancelled,
+            ErrorCode::Cancelled.message(),
+        )
+        .await?;
+        requested = true;
+    }
+    if let Some(task) = runtime.command_tasks.get(request_id) {
+        task.cancel();
+        context
+            .state
+            .record_cancel_requested(request_id.to_owned(), task.session_id.clone());
+        append_host_audit(
+            context,
+            "command.cancel",
+            Some(request_id.to_owned()),
+            task.session_id.clone(),
+            None,
+            Some("host_requested"),
+        );
+        requested = true;
+    }
+    Ok(requested)
+}
+
 async fn handle_host_binary(
     context: &HostContext,
     sink: &SharedWsSink,
@@ -341,9 +533,24 @@ async fn handle_host_binary(
     handle_binary_frame(context, &mut sink, uploads, bytes).await
 }
 
-fn abort_command_tasks(command_tasks: &mut CommandTasks) {
-    for (_, task) in command_tasks.drain() {
+fn abort_command_tasks(context: &HostContext, command_tasks: &mut CommandTasks) {
+    for (request_id, task) in command_tasks.drain() {
+        context
+            .state
+            .record_cancel_requested(request_id, task.session_id.clone());
         task.abort();
+    }
+}
+
+fn abort_uploads(context: &HostContext, uploads: &mut HashMap<String, UploadState>) {
+    for (request_id, upload) in uploads.drain() {
+        context.state.record_transfer_completed(
+            request_id,
+            upload.session_id.clone(),
+            HostTaskStatus::Cancelled,
+            None,
+            "listener_stopped".to_owned(),
+        );
     }
 }
 

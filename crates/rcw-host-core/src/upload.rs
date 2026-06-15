@@ -29,7 +29,7 @@ pub(crate) const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const UPLOAD_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct UploadState {
-    session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     args: UploadArgs,
     file: Option<File>,
     temp_path: PathBuf,

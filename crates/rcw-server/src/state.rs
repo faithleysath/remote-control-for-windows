@@ -329,6 +329,35 @@ impl ServerState {
         removed
     }
 
+    pub(crate) async fn remove_session_for_host(
+        &self,
+        session_id: &str,
+        host_id: &str,
+        connection_id: &str,
+        error: ErrorPayload,
+    ) -> Option<SessionState> {
+        let removed = {
+            let mut sessions = self.sessions.lock().await;
+            match sessions.get(session_id) {
+                Some(session)
+                    if session.host_id == host_id && session.connection_id == connection_id =>
+                {
+                    sessions.remove(session_id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(session) = &removed {
+            let session_ids = HashSet::from([session.session_id.clone()]);
+            self.remove_routes_for_sessions(&session_ids).await;
+            self.remove_tunnels_for_sessions(&session_ids, "session_closed")
+                .await;
+            self.fail_running_exec_jobs_for_sessions(&session_ids, error)
+                .await;
+        }
+        removed
+    }
+
     pub(crate) async fn bind_controller_to_session(
         &self,
         session_id: &str,
@@ -1274,6 +1303,55 @@ mod tests {
             .session_if_valid("session-new", "token-new")
             .await
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn remove_session_for_host_requires_current_connection() {
+        let state = ServerState::new();
+        state
+            .create_session(
+                "session-1".to_owned(),
+                "token-1".to_owned(),
+                "host-1".to_owned(),
+                "ABCD-EFGH-IJKL".to_owned(),
+                "conn-new".to_owned(),
+                tx(),
+            )
+            .await;
+
+        let stale = state
+            .remove_session_for_host(
+                "session-1",
+                "host-1",
+                "conn-old",
+                ErrorPayload {
+                    code: ErrorCode::Cancelled,
+                    message: "host requested close".to_owned(),
+                },
+            )
+            .await;
+        assert!(stale.is_none());
+        assert!(state
+            .session_if_valid("session-1", "token-1")
+            .await
+            .is_some());
+
+        let current = state
+            .remove_session_for_host(
+                "session-1",
+                "host-1",
+                "conn-new",
+                ErrorPayload {
+                    code: ErrorCode::Cancelled,
+                    message: "host requested close".to_owned(),
+                },
+            )
+            .await;
+        assert!(current.is_some());
+        assert!(state
+            .session_if_valid("session-1", "token-1")
+            .await
+            .is_none());
     }
 
     #[tokio::test]

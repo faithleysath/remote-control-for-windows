@@ -114,6 +114,31 @@ pub(crate) async fn abort_tunnel_streams_for_session(
     }
 }
 
+pub(crate) async fn close_tunnel_locally(
+    tunnels: &mut HostTunnelTasks,
+    streams: &HostTunnelStreams,
+    tunnel_id: &str,
+) -> bool {
+    let mut closed = false;
+    if let Some(tunnel) = tunnels.remove(tunnel_id) {
+        tunnel.abort();
+        closed = true;
+    }
+    let mut streams = streams.lock().await;
+    let stream_ids = streams
+        .keys()
+        .filter(|key| key.starts_with(tunnel_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in stream_ids {
+        if let Some(stream) = streams.remove(&key) {
+            stream.handle.abort();
+            closed = true;
+        }
+    }
+    closed
+}
+
 pub(crate) async fn handle_tunnel_open(
     context: &HostContext,
     sink: &SharedWsSink,
@@ -208,20 +233,7 @@ pub(crate) async fn handle_tunnel_close(
     let request_id = message.request_id.clone();
     let session_id = message.session_id.clone();
     let payload: TunnelClosePayload = message.payload_as()?;
-    if let Some(task) = tunnels.remove(&payload.tunnel_id) {
-        task.abort();
-    }
-    let mut streams = streams.lock().await;
-    let stream_ids = streams
-        .keys()
-        .filter(|key| key.starts_with(&payload.tunnel_id))
-        .cloned()
-        .collect::<Vec<_>>();
-    for key in stream_ids {
-        if let Some(stream) = streams.remove(&key) {
-            stream.handle.abort();
-        }
-    }
+    close_tunnel_locally(tunnels, streams, &payload.tunnel_id).await;
     append_host_audit(
         context,
         "tunnel.closed",
