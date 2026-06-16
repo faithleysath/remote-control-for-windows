@@ -2,6 +2,7 @@
   "name": "rcw-host-gui",
   "version": "0.1.10",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",

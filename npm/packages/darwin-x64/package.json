@@ -2,7 +2,7 @@
   "name": "rcwctl-darwin-x64",
   "version": "0.1.10",
   "description": "Prebuilt rcwctl binary for macOS x64",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/faithleysath/remote-control-for-windows.git",

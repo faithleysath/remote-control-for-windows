@@ -2,7 +2,7 @@
   "name": "rcwctl",
   "version": "0.1.10",
   "description": "Meta package for the Remote Control for Windows CLI",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/faithleysath/remote-control-for-windows.git",

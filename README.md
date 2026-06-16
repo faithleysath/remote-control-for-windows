@@ -196,4 +196,6 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 
 ## 许可证
 
-本项目使用 MIT 许可证。见 [LICENSE](LICENSE)。
+自本次许可证迁移提交起，本项目使用 GPL-3.0-or-later 许可证。见 [LICENSE](LICENSE)。
+
+迁移前已经发布的版本仍按其发布时的 MIT 许可证授权；本次变更不追溯修改既有版本或既有提交的授权条款。
