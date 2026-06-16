@@ -1,6 +1,6 @@
 {
   "name": "rcwctl-darwin-x64",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Prebuilt rcwctl binary for macOS x64",
   "license": "MIT",
   "repository": {

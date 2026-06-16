@@ -4,6 +4,8 @@
 
 ## 未发布
 
+## 0.1.10 - 2026-06-16
+
 - GUI 新增 Exec 任务 tab，展示 exec 任务列表、脱敏参数/CWD 摘要、状态、耗时、exit code、stdout/stderr 字节统计和错误摘要，并支持复制 request/session id 与取消 running exec 任务。
 - `HostSnapshot` 的 exec 任务可观测字段补齐，但仍不在 host GUI snapshot 中缓存 stdout/stderr 原文；Tauri 权限只新增窄 `host_cancel_exec_task` command。
 - GUI 新增传输任务 tab，展示 upload/download 的脱敏路径摘要、size、transferred bytes、progress、speed、sha256、duration、result/error，并支持复制 request/task/path 摘要和取消 running transfer。
