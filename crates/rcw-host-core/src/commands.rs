@@ -22,14 +22,15 @@ use tracing::error;
 
 use crate::{
     audit::{
-        append_host_audit_record, command_audit_details, CommandAuditDetails, HostAuditRecord,
+        append_host_audit_record, command_audit_details, sanitize_audit_text, CommandAuditDetails,
+        HostAuditRecord,
     },
     output::{
         send_binary_chunks, send_complete, send_error, send_output, send_shared_complete,
         send_shared_complete_kind, send_shared_error, send_shared_output, SharedWsSink, WsSink,
     },
     platform,
-    state::task_status_for_result,
+    state::{task_status_for_result, HostCommandCompletion},
     HostContext, HostTaskStatus, HostTransferDirection,
 };
 
@@ -150,6 +151,7 @@ async fn execute_command_inline(
         &request_id,
         session_id.clone(),
         &command_name,
+        &audit_details,
         None,
     );
     append_command_started_audit(
@@ -162,33 +164,53 @@ async fn execute_command_inline(
         started_at,
     );
 
-    let result = match payload.command.as_str() {
+    let (result, complete) = match payload.command.as_str() {
         COMMAND_EXEC => {
-            command_exec(sink, &request_id, session_id.clone(), payload.args, None).await
+            let result = command_exec(
+                context,
+                sink,
+                &request_id,
+                session_id.clone(),
+                payload.args,
+                None,
+            )
+            .await;
+            let complete = result.as_ref().ok().cloned();
+            (result.map(|_| ()), complete)
         }
-        COMMAND_DOWNLOAD_BEGIN => {
-            command_download(sink, &request_id, session_id.clone(), payload.args, None).await
-        }
-        COMMAND_SCREENSHOT => {
-            command_screenshot(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        COMMAND_WINDOWS => command_windows(sink, &request_id, session_id.clone()).await,
-        COMMAND_MOUSE_MOVE => {
-            command_mouse_move(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        COMMAND_MOUSE_CLICK => {
-            command_mouse_click(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        COMMAND_MOUSE_SCROLL => {
-            command_mouse_scroll(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        COMMAND_KEYBOARD_TYPE => {
-            command_keyboard_type(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        COMMAND_KEYBOARD_KEY => {
-            command_keyboard_key(sink, &request_id, session_id.clone(), payload.args).await
-        }
-        _ => Err(anyhow!("unsupported command")),
+        COMMAND_DOWNLOAD_BEGIN => (
+            command_download(sink, &request_id, session_id.clone(), payload.args, None).await,
+            None,
+        ),
+        COMMAND_SCREENSHOT => (
+            command_screenshot(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        COMMAND_WINDOWS => (
+            command_windows(sink, &request_id, session_id.clone()).await,
+            None,
+        ),
+        COMMAND_MOUSE_MOVE => (
+            command_mouse_move(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        COMMAND_MOUSE_CLICK => (
+            command_mouse_click(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        COMMAND_MOUSE_SCROLL => (
+            command_mouse_scroll(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        COMMAND_KEYBOARD_TYPE => (
+            command_keyboard_type(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        COMMAND_KEYBOARD_KEY => (
+            command_keyboard_key(sink, &request_id, session_id.clone(), payload.args).await,
+            None,
+        ),
+        _ => (Err(anyhow!("unsupported command")), None),
     };
 
     let ok = result.is_ok();
@@ -213,6 +235,8 @@ async fn execute_command_inline(
             duration_ms,
             result: result_label,
             bytes_transferred: None,
+            complete,
+            error: result.as_ref().err(),
         },
     );
     append_command_completed_audit(
@@ -310,6 +334,7 @@ async fn run_async_command_task(
         &request_id,
         session_id.clone(),
         &command_name,
+        &audit_details,
         None,
     );
     append_command_started_audit(
@@ -322,18 +347,21 @@ async fn run_async_command_task(
         started_at,
     );
 
-    let result = match payload.command.as_str() {
+    let (result, complete) = match payload.command.as_str() {
         COMMAND_EXEC => {
-            command_exec_shared(
+            let result = command_exec_shared(
+                &context,
                 &sink,
                 &request_id,
                 session_id.clone(),
                 payload.args,
                 Some(cancel_rx),
             )
-            .await
+            .await;
+            let complete = result.as_ref().ok().cloned();
+            (result.map(|_| ()), complete)
         }
-        COMMAND_DOWNLOAD_BEGIN => {
+        COMMAND_DOWNLOAD_BEGIN => (
             command_download_shared(
                 &sink,
                 &request_id,
@@ -341,9 +369,10 @@ async fn run_async_command_task(
                 payload.args,
                 Some(cancel_rx),
             )
-            .await
-        }
-        _ => Err(anyhow!("unsupported async command")),
+            .await,
+            None,
+        ),
+        _ => (Err(anyhow!("unsupported async command")), None),
     };
 
     let ok = result.is_ok();
@@ -368,6 +397,8 @@ async fn run_async_command_task(
             duration_ms,
             result: result_label,
             bytes_transferred: None,
+            complete,
+            error: result.as_ref().err(),
         },
     );
     append_command_completed_audit(
@@ -433,6 +464,7 @@ fn record_task_started(
     request_id: &str,
     session_id: Option<String>,
     command: &str,
+    details: &CommandAuditDetails,
     size: Option<u64>,
 ) {
     if command == COMMAND_DOWNLOAD_BEGIN {
@@ -443,9 +475,13 @@ fn record_task_started(
             size,
         );
     } else {
-        context
-            .state
-            .record_command_started(request_id.to_owned(), session_id, command.to_owned());
+        context.state.record_command_started(
+            request_id.to_owned(),
+            session_id,
+            command.to_owned(),
+            details.args_summary.clone(),
+            details.path_summary.clone(),
+        );
     }
 }
 
@@ -457,6 +493,8 @@ struct TaskCompletion<'a> {
     duration_ms: u64,
     result: String,
     bytes_transferred: Option<u64>,
+    complete: Option<CommandCompletePayload>,
+    error: Option<&'a anyhow::Error>,
 }
 
 struct CommandCompleteAudit<'a> {
@@ -481,14 +519,20 @@ fn record_task_completed(context: &HostContext, completion: TaskCompletion<'_>) 
             completion.result,
         );
     } else {
-        context.state.record_command_completed(
-            completion.request_id.to_owned(),
-            completion.session_id,
-            completion.command.to_owned(),
-            completion.status,
-            completion.duration_ms,
-            completion.result,
-        );
+        context
+            .state
+            .record_command_completed(HostCommandCompletion {
+                request_id: completion.request_id.to_owned(),
+                session_id: completion.session_id,
+                command: completion.command.to_owned(),
+                status: completion.status,
+                duration_ms: completion.duration_ms,
+                result: completion.result,
+                exit_code: completion.complete.and_then(|complete| complete.exit_code),
+                error_message: completion
+                    .error
+                    .map(|error| sanitize_audit_text(&error.to_string())),
+            });
     }
 }
 
@@ -498,6 +542,7 @@ fn task_result_label(status: HostTaskStatus) -> String {
         HostTaskStatus::Completed => "completed",
         HostTaskStatus::Failed => "failed",
         HostTaskStatus::Cancelled => "cancelled",
+        HostTaskStatus::Timeout => "timeout",
     }
     .to_owned()
 }
@@ -552,12 +597,13 @@ fn append_command_completed_audit(context: &HostContext, audit: CommandCompleteA
 }
 
 async fn command_exec(
+    context: &HostContext,
     sink: &mut WsSink,
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
     cancel_rx: Option<watch::Receiver<bool>>,
-) -> Result<()> {
+) -> Result<CommandCompletePayload> {
     let args: ExecArgs = serde_json::from_value(args)?;
     let started = Instant::now();
     let mut command = Command::new(&args.program);
@@ -589,6 +635,9 @@ async fn command_exec(
     let status = loop {
         tokio::select! {
             Some((stream, data)) = output_rx.recv() => {
+                context
+                    .state
+                    .record_command_output(request_id, &stream, data.len(), false);
                 send_output(sink, request_id, session_id.clone(), &stream, &data).await?;
             }
             result = &mut wait => {
@@ -627,32 +676,32 @@ async fn command_exec(
     };
 
     while let Ok((stream, data)) = output_rx.try_recv() {
+        context
+            .state
+            .record_command_output(request_id, &stream, data.len(), false);
         send_output(sink, request_id, session_id.clone(), &stream, &data).await?;
     }
 
-    send_complete(
-        sink,
-        request_id,
-        session_id,
-        CommandCompletePayload {
-            ok: status.success(),
-            exit_code: status.code(),
-            duration_ms: started.elapsed().as_millis() as u64,
-            size: None,
-            sha256: None,
-            summary: Some(format!("program={}", args.program)),
-        },
-    )
-    .await
+    let complete = CommandCompletePayload {
+        ok: status.success(),
+        exit_code: status.code(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        size: None,
+        sha256: None,
+        summary: Some(format!("program={}", args.program)),
+    };
+    send_complete(sink, request_id, session_id, complete.clone()).await?;
+    Ok(complete)
 }
 
 async fn command_exec_shared(
+    context: &HostContext,
     sink: &SharedWsSink,
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
     cancel_rx: Option<watch::Receiver<bool>>,
-) -> Result<()> {
+) -> Result<CommandCompletePayload> {
     let args: ExecArgs = serde_json::from_value(args)?;
     let started = Instant::now();
     let mut command = Command::new(&args.program);
@@ -684,6 +733,9 @@ async fn command_exec_shared(
     let status = loop {
         tokio::select! {
             Some((stream, data)) = output_rx.recv() => {
+                context
+                    .state
+                    .record_command_output(request_id, &stream, data.len(), false);
                 send_shared_output(sink, request_id, session_id.clone(), &stream, &data).await?;
             }
             result = &mut wait => {
@@ -722,23 +774,22 @@ async fn command_exec_shared(
     };
 
     while let Ok((stream, data)) = output_rx.try_recv() {
+        context
+            .state
+            .record_command_output(request_id, &stream, data.len(), false);
         send_shared_output(sink, request_id, session_id.clone(), &stream, &data).await?;
     }
 
-    send_shared_complete(
-        sink,
-        request_id,
-        session_id,
-        CommandCompletePayload {
-            ok: status.success(),
-            exit_code: status.code(),
-            duration_ms: started.elapsed().as_millis() as u64,
-            size: None,
-            sha256: None,
-            summary: Some(format!("program={}", args.program)),
-        },
-    )
-    .await
+    let complete = CommandCompletePayload {
+        ok: status.success(),
+        exit_code: status.code(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        size: None,
+        sha256: None,
+        summary: Some(format!("program={}", args.program)),
+    };
+    send_shared_complete(sink, request_id, session_id, complete.clone()).await?;
+    Ok(complete)
 }
 
 async fn command_download(

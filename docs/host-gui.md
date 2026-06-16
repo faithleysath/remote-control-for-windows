@@ -1,8 +1,8 @@
 # Tauri Host GUI
 
-`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话、审计和设置页面，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态、结束当前会话，并浏览当前运行期的事件时间线。
+`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话、Exec 任务、审计和设置页面，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态、结束当前会话、查看/取消运行中的 exec 任务，并浏览当前运行期的事件时间线。
 
-当前仍不包含独立 exec/transfer/tunnel 任务页、托盘、安装包或后台自启动。
+当前仍不包含独立 transfer/tunnel 任务页、托盘、安装包或后台自启动。
 
 ## 目录
 
@@ -65,6 +65,18 @@ GUI 复用 `rcw-host-core` 的配置解析：
 - auth request 历史
 - End Session 操作
 
+Exec 页显示：
+
+- 当前和最近的 exec 任务列表。
+- request id / task id、session id、状态、开始/结束时间和耗时。
+- program/argv/cwd 摘要，摘要来自 host-core 的脱敏策略，不展示原始 argv。
+- exit code、stdout/stderr 字节数和截断标记。
+- error/result 摘要。
+- 复制 request id / session id。
+- 对 running exec 任务发起 Cancel；GUI 等待 host-core 明确返回控制请求结果后再提示。
+
+Exec 页不缓存 stdout/stderr 原文；输出正文仍只经由控制端命令结果通道按既有限制处理。
+
 审计页显示：
 
 - 当前运行期 `HostEvent` 历史，默认保留最近 200 条。
@@ -103,6 +115,7 @@ GUI 复用 `rcw-host-core` 的配置解析：
 - `host_restart_listener`：使用已保存的运行时配置重启 listener。
 - `host_copy_connection_info`：通过 host-core/platform 复制连接信息，并返回同一份文本给前端兜底。
 - `host_close_current_session`：请求结束当前 session。
+- `host_cancel_exec_task`：请求取消指定 running exec 任务，只接收 request id，不开放任意进程控制。
 - `host_reveal_audit_location`：用系统文件管理器显示当前 audit 文件位置，不开放通用 shell/fs 调用。
 
 前端没有直接访问协议 socket、文件系统、shell 或底层 Windows API 的入口。后续新增 GUI 操作时，应先在 `rcw-host-core` 暴露明确的控制 API，再通过窄 Tauri command 调用。
@@ -127,6 +140,7 @@ GUI 启动时订阅 `HostService::subscribe_events()`，并通过 Tauri core eve
 - `allow-host-restart-listener`
 - `allow-host-copy-connection-info`
 - `allow-host-close-current-session`
+- `allow-host-cancel-exec-task`
 - `allow-host-reveal-audit-location`
 - `core:event:default`
 

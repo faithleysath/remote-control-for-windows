@@ -27,7 +27,7 @@ type HostEventKind =
   | "tunnel_closed"
   | "error_recorded";
 
-type Tab = "overview" | "session" | "audit" | "settings";
+type Tab = "overview" | "session" | "exec" | "audit" | "settings";
 type NoticeTone = "ok" | "warn" | "bad";
 type AuditTypeFilter =
   | "all"
@@ -68,6 +68,14 @@ interface HostCommandTask {
   result?: string;
   duration_ms?: number;
   summary?: string;
+  args_summary?: string;
+  path_summary?: string;
+  exit_code?: number;
+  stdout_bytes: number;
+  stderr_bytes: number;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+  error_message?: string;
 }
 
 interface HostTransferTask {
@@ -189,6 +197,7 @@ interface AppState {
   settingsDirty: boolean;
   auditFilters: AuditFilters;
   events: HostEvent[];
+  selectedExecRequestId: string | null;
   loadError: string | null;
   notice: { tone: NoticeTone; text: string } | null;
   loading: boolean;
@@ -212,6 +221,7 @@ const state: AppState = {
     order: "desc",
   },
   events: [],
+  selectedExecRequestId: null,
   loadError: null,
   notice: null,
   loading: true,
@@ -271,11 +281,22 @@ function formatCount(value: number): string {
   return new Intl.NumberFormat().format(value);
 }
 
+function formatBytes(value?: number): string {
+  if (value === undefined) {
+    return "0 B";
+  }
+  return `${new Intl.NumberFormat().format(value)} B`;
+}
+
 function statusLabel(status?: ListenerStatus): string {
   if (!status) {
     return "Unknown";
   }
   return status.replaceAll("_", " ");
+}
+
+function taskStatusLabel(status?: string): string {
+  return status ? status.replaceAll("_", " ") : "unknown";
 }
 
 function statusClass(status?: ListenerStatus): string {
@@ -324,6 +345,41 @@ function renderDataRow(label: string, value: unknown, options: { code?: boolean 
       <dd class="${options.code ? "mono" : ""}">${display(value)}</dd>
     </div>
   `;
+}
+
+function statusTone(status?: string): "ok" | "warn" | "bad" | "idle" {
+  if (status === "completed") {
+    return "ok";
+  }
+  if (status === "running") {
+    return "warn";
+  }
+  if (status === "failed" || status === "cancelled" || status === "timeout") {
+    return "bad";
+  }
+  return "idle";
+}
+
+function sortedExecTasks(snapshot: HostSnapshot | null): HostCommandTask[] {
+  return (snapshot?.commands ?? [])
+    .filter((task) => task.command === "exec")
+    .slice()
+    .sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at));
+}
+
+function selectedExecTask(tasks: HostCommandTask[]): HostCommandTask | null {
+  if (tasks.length === 0) {
+    return null;
+  }
+  return (
+    tasks.find((task) => task.request_id === state.selectedExecRequestId) ??
+    tasks.find((task) => task.status === "running") ??
+    tasks[0]
+  );
+}
+
+function isExecRunning(task: HostCommandTask): boolean {
+  return task.status === "running";
 }
 
 function eventKey(event: HostEvent): string {
@@ -551,6 +607,7 @@ function renderTabs(): string {
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: "overview", label: "Overview" },
     { id: "session", label: "Session" },
+    { id: "exec", label: "Exec" },
     { id: "audit", label: "Audit" },
     { id: "settings", label: "Settings" },
   ];
@@ -760,6 +817,108 @@ function renderSettings(snapshot: HostSnapshot | null): string {
   `;
 }
 
+function renderExec(snapshot: HostSnapshot | null): string {
+  const tasks = sortedExecTasks(snapshot);
+  const selected = selectedExecTask(tasks);
+  return `
+    <section class="task-layout" aria-label="Exec tasks">
+      <div class="panel task-list-panel">
+        <div class="panel-heading">
+          <span class="section-label">Exec tasks</span>
+          <span class="task-count">${escapeHtml(formatCount(tasks.length))}</span>
+        </div>
+        <div class="task-list">
+          ${
+            tasks.length > 0
+              ? tasks.map((task) => renderExecTaskRow(task, selected?.request_id)).join("")
+              : `<div class="empty">No exec tasks</div>`
+          }
+        </div>
+      </div>
+
+      <div class="panel task-detail-panel">
+        ${selected ? renderExecDetail(selected) : `<div class="empty">Select an exec task</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderExecTaskRow(task: HostCommandTask, selectedRequestId?: string): string {
+  const selected = task.request_id === selectedRequestId;
+  const tone = statusTone(task.status);
+  return `
+    <button
+      class="task-row ${selected ? "selected" : ""}"
+      data-exec-select="${escapeHtml(task.request_id)}"
+      type="button"
+    >
+      <span class="task-row-main">
+        <strong>${display(task.args_summary ?? task.summary ?? task.command)}</strong>
+        <span class="result ${tone}">${escapeHtml(taskStatusLabel(task.status))}</span>
+      </span>
+      <span class="task-row-meta">
+        <code>${display(task.request_id)}</code>
+        <span>${escapeHtml(formatDate(task.started_at))}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderExecDetail(task: HostCommandTask): string {
+  const canCancel = isExecRunning(task) && state.busyAction === null;
+  const outputSummary = [
+    `stdout ${formatBytes(task.stdout_bytes)}${task.stdout_truncated ? " truncated" : ""}`,
+    `stderr ${formatBytes(task.stderr_bytes)}${task.stderr_truncated ? " truncated" : ""}`,
+  ].join(" / ");
+  return `
+    <div class="panel-heading">
+      <span class="section-label">Exec detail</span>
+      <div class="button-row">
+        <button
+          id="copy-exec-request"
+          type="button"
+          ${disabledAttr(state.busyAction !== null)}
+        >
+          ${busyLabel("copy-exec-request", "Copy Request")}
+        </button>
+        <button
+          id="copy-exec-session"
+          type="button"
+          ${disabledAttr(!task.session_id || state.busyAction !== null)}
+        >
+          ${busyLabel("copy-exec-session", "Copy Session")}
+        </button>
+        <button
+          id="cancel-exec-task"
+          type="button"
+          ${disabledAttr(!canCancel)}
+        >
+          ${busyLabel(`cancel-exec:${task.request_id}`, "Cancel")}
+        </button>
+      </div>
+    </div>
+    <dl>
+      ${renderDataRow("Request ID", task.request_id, { code: true })}
+      ${renderDataRow("Task ID", task.request_id, { code: true })}
+      ${renderDataRow("Session ID", task.session_id ?? "None", { code: Boolean(task.session_id) })}
+      ${renderDataRow("Program", task.args_summary ?? "No summary")}
+      ${renderDataRow("CWD", task.path_summary ?? "None")}
+      ${renderDataRow("Status", taskStatusLabel(task.status))}
+      ${renderDataRow("Started", formatDate(task.started_at))}
+      ${renderDataRow("Finished", formatDate(task.finished_at))}
+      ${renderDataRow("Duration", task.duration_ms === undefined ? "Pending" : `${task.duration_ms}ms`)}
+      ${renderDataRow("Exit code", task.exit_code ?? "None")}
+      ${renderDataRow("Output", outputSummary)}
+      ${renderDataRow("Result", task.result ?? "Pending")}
+      ${renderDataRow("Error", task.error_message ?? "None")}
+    </dl>
+    <details class="audit-detail">
+      <summary>Task JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(task, null, 2))}</pre>
+    </details>
+  `;
+}
+
 function renderAudit(): string {
   const hasAuditPath = Boolean(state.snapshot?.audit_path);
   return `
@@ -858,6 +1017,9 @@ function renderContent(): string {
   if (state.activeTab === "session") {
     return renderSession(state.snapshot);
   }
+  if (state.activeTab === "exec") {
+    return renderExec(state.snapshot);
+  }
   if (state.activeTab === "audit") {
     return renderAudit();
   }
@@ -905,6 +1067,9 @@ function bindUi(): void {
   bindClick("#tab-session", () => {
     switchTab("session");
   });
+  bindClick("#tab-exec", () => {
+    switchTab("exec");
+  });
   bindClick("#tab-audit", () => {
     switchTab("audit");
   });
@@ -928,6 +1093,7 @@ function bindUi(): void {
   });
 
   bindSettingsForm();
+  bindExecTasks();
   bindAuditFilters();
 }
 
@@ -1002,6 +1168,34 @@ function bindAuditFilters(): void {
   });
 }
 
+function bindExecTasks(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-exec-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedExecRequestId = button.dataset.execSelect ?? null;
+      render();
+    });
+  });
+
+  bindClick("#copy-exec-request", () => {
+    const task = selectedExecTask(sortedExecTasks(state.snapshot));
+    if (task) {
+      void copyText("copy-exec-request", task.request_id, "Exec request id copied");
+    }
+  });
+  bindClick("#copy-exec-session", () => {
+    const task = selectedExecTask(sortedExecTasks(state.snapshot));
+    if (task?.session_id) {
+      void copyText("copy-exec-session", task.session_id, "Exec session id copied");
+    }
+  });
+  bindClick("#cancel-exec-task", () => {
+    const task = selectedExecTask(sortedExecTasks(state.snapshot));
+    if (task) {
+      void cancelExecTask(task.request_id);
+    }
+  });
+}
+
 function bindTextInput(selector: string, update: (value: string) => void): void {
   const input = document.querySelector<HTMLInputElement>(selector);
   input?.addEventListener("input", () => {
@@ -1062,6 +1256,47 @@ async function runAction(action: string, command: string): Promise<void> {
     await refreshSettings(false);
   } catch (error) {
     state.notice = { tone: "bad", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
+async function cancelExecTask(requestId: string): Promise<void> {
+  const action = `cancel-exec:${requestId}`;
+  state.busyAction = action;
+  state.loadError = null;
+  state.notice = null;
+  render();
+
+  try {
+    const outcome = await invoke<HostActionOutcome>("host_cancel_exec_task", {
+      requestId,
+    });
+    state.snapshot = outcome.snapshot;
+    state.notice = { tone: outcome.changed ? "ok" : "warn", text: outcome.message };
+    state.selectedExecRequestId = requestId;
+  } catch (error) {
+    state.notice = { tone: "bad", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
+async function copyText(action: string, value: string, successText: string): Promise<void> {
+  state.busyAction = action;
+  state.notice = null;
+  render();
+
+  try {
+    await navigator.clipboard.writeText(value);
+    state.notice = { tone: "ok", text: successText };
+  } catch (error) {
+    state.notice = {
+      tone: "bad",
+      text: error instanceof Error ? error.message : String(error),
+    };
   } finally {
     state.busyAction = null;
     render();

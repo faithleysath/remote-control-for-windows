@@ -8,6 +8,7 @@ fn main() {
         "host_restart_listener",
         "host_copy_connection_info",
         "host_close_current_session",
+        "host_cancel_exec_task",
         "host_reveal_audit_location",
     ];
 

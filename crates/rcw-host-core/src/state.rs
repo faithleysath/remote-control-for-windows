@@ -36,6 +36,7 @@ pub enum HostTaskStatus {
     Completed,
     Failed,
     Cancelled,
+    Timeout,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,6 +142,33 @@ pub struct HostCommandTaskSnapshot {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stdout_bytes: u64,
+    #[serde(default)]
+    pub stderr_bytes: u64,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+pub(crate) struct HostCommandCompletion {
+    pub(crate) request_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) command: String,
+    pub(crate) status: HostTaskStatus,
+    pub(crate) duration_ms: u64,
+    pub(crate) result: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -472,6 +500,8 @@ impl HostStateHandle {
         request_id: String,
         session_id: Option<String>,
         command: String,
+        args_summary: Option<String>,
+        path_summary: Option<String>,
     ) {
         let time = now_rfc3339();
         self.apply(
@@ -497,48 +527,79 @@ impl HostStateHandle {
                         result: None,
                         duration_ms: None,
                         summary: None,
+                        args_summary,
+                        path_summary,
+                        exit_code: None,
+                        stdout_bytes: 0,
+                        stderr_bytes: 0,
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                        error_message: None,
                     },
                 );
             },
         );
     }
 
-    pub(crate) fn record_command_completed(
+    pub(crate) fn record_command_output(
         &self,
-        request_id: String,
-        session_id: Option<String>,
-        command: String,
-        status: HostTaskStatus,
-        duration_ms: u64,
-        result: String,
+        request_id: &str,
+        stream: &str,
+        bytes: usize,
+        truncated: bool,
     ) {
+        let mut inner = self.inner.lock().expect("host state lock poisoned");
+        if let Some(command) = find_command_mut(&mut inner, request_id) {
+            match stream {
+                "stdout" => {
+                    command.stdout_bytes = command.stdout_bytes.saturating_add(bytes as u64);
+                    command.stdout_truncated |= truncated;
+                }
+                "stderr" => {
+                    command.stderr_bytes = command.stderr_bytes.saturating_add(bytes as u64);
+                    command.stderr_truncated |= truncated;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn record_command_completed(&self, completion: HostCommandCompletion) {
         let time = now_rfc3339();
-        let summary = Some(result.clone());
+        let summary = Some(completion.result.clone());
+        let redacted_error = completion
+            .error_message
+            .map(|message| redact_reason(&message));
         self.apply(
             HostEvent {
                 time: time.clone(),
                 kind: HostEventKind::CommandCompleted,
-                request_id: Some(request_id.clone()),
-                session_id: session_id.clone(),
-                command: Some(command.clone()),
-                status: Some(task_status_str(status).to_owned()),
+                request_id: Some(completion.request_id.clone()),
+                session_id: completion.session_id.clone(),
+                command: Some(completion.command.clone()),
+                status: Some(task_status_str(completion.status).to_owned()),
                 summary,
             },
             |inner| {
-                if let Some(command) = find_command_mut(inner, &request_id) {
-                    command.status = status;
+                if let Some(command) = find_command_mut(inner, &completion.request_id) {
+                    command.status = completion.status;
                     command.finished_at = Some(time.clone());
-                    command.duration_ms = Some(duration_ms);
-                    command.result = Some(result.clone());
+                    command.duration_ms = Some(completion.duration_ms);
+                    command.result = Some(completion.result.clone());
+                    command.exit_code = completion.exit_code;
+                    command.error_message = redacted_error.clone();
                 }
-                if matches!(status, HostTaskStatus::Failed | HostTaskStatus::Cancelled) {
+                if matches!(
+                    completion.status,
+                    HostTaskStatus::Failed | HostTaskStatus::Cancelled | HostTaskStatus::Timeout
+                ) {
                     push_error(
                         &mut inner.snapshot,
                         HostErrorSnapshot {
                             at: time,
-                            summary: format!("command {result}"),
-                            request_id: Some(request_id),
-                            session_id,
+                            summary: format!("command {}", completion.result),
+                            request_id: Some(completion.request_id),
+                            session_id: completion.session_id,
                         },
                     );
                 }
@@ -968,6 +1029,13 @@ pub(crate) fn task_status_for_result(ok: bool, error: Option<&anyhow::Error>) ->
     if ok {
         return HostTaskStatus::Completed;
     }
+    let is_timeout = error
+        .into_iter()
+        .flat_map(|err| err.chain())
+        .any(|cause| cause.to_string().contains("command timed out"));
+    if is_timeout {
+        return HostTaskStatus::Timeout;
+    }
     let is_cancelled = error
         .into_iter()
         .flat_map(|err| err.chain())
@@ -985,6 +1053,7 @@ fn task_status_str(status: HostTaskStatus) -> &'static str {
         HostTaskStatus::Completed => "completed",
         HostTaskStatus::Failed => "failed",
         HostTaskStatus::Cancelled => "cancelled",
+        HostTaskStatus::Timeout => "timeout",
     }
 }
 
@@ -1071,15 +1140,23 @@ mod tests {
         let state = state();
         let mut events = state.subscribe();
 
-        state.record_command_started("req".to_owned(), Some("sess".to_owned()), "exec".to_owned());
-        state.record_command_completed(
+        state.record_command_started(
             "req".to_owned(),
             Some("sess".to_owned()),
             "exec".to_owned(),
-            HostTaskStatus::Completed,
-            12,
-            "ok".to_owned(),
+            Some("program=pwsh.exe argv_count=2".to_owned()),
+            Some("cwd_basename=Work".to_owned()),
         );
+        state.record_command_completed(HostCommandCompletion {
+            request_id: "req".to_owned(),
+            session_id: Some("sess".to_owned()),
+            command: "exec".to_owned(),
+            status: HostTaskStatus::Completed,
+            duration_ms: 12,
+            result: "ok".to_owned(),
+            exit_code: Some(0),
+            error_message: None,
+        });
 
         let started = events.try_recv().unwrap();
         let completed = events.try_recv().unwrap();
@@ -1091,6 +1168,15 @@ mod tests {
         assert_eq!(snapshot.commands[0].request_id, "req");
         assert_eq!(snapshot.commands[0].status, HostTaskStatus::Completed);
         assert_eq!(snapshot.commands[0].duration_ms, Some(12));
+        assert_eq!(snapshot.commands[0].exit_code, Some(0));
+        assert_eq!(
+            snapshot.commands[0].args_summary.as_deref(),
+            Some("program=pwsh.exe argv_count=2")
+        );
+        assert_eq!(
+            snapshot.commands[0].path_summary.as_deref(),
+            Some("cwd_basename=Work")
+        );
         assert_eq!(snapshot.events.len(), 2);
         assert_eq!(snapshot.events[0].kind, HostEventKind::CommandStarted);
         assert_eq!(snapshot.events[1].kind, HostEventKind::CommandCompleted);

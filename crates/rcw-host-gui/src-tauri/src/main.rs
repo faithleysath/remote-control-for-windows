@@ -261,6 +261,35 @@ async fn host_close_current_session(
 }
 
 #[tauri::command]
+async fn host_cancel_exec_task(
+    request_id: String,
+    state: State<'_, GuiState>,
+) -> CommandResult<HostActionOutcome> {
+    let request_id = request_id.trim().to_owned();
+    if request_id.is_empty() {
+        return Err("request id is required".to_owned());
+    }
+
+    let outcome = {
+        let service = state.service.lock().await;
+        let outcome = service
+            .cancel_exec_task(request_id.clone())
+            .await
+            .map_err(to_command_error)?;
+        HostActionOutcome {
+            changed: outcome.requested,
+            message: if outcome.requested {
+                format!("Exec task {} cancel requested", outcome.request_id)
+            } else {
+                format!("Exec task {request_id} was not running")
+            },
+            snapshot: service.snapshot(),
+        }
+    };
+    Ok(outcome)
+}
+
+#[tauri::command]
 async fn host_copy_connection_info(state: State<'_, GuiState>) -> CommandResult<HostCopyOutcome> {
     let service = state.service.lock().await;
     match service.copy_connection_info() {
@@ -316,6 +345,7 @@ fn main() {
             host_restart_listener,
             host_copy_connection_info,
             host_close_current_session,
+            host_cancel_exec_task,
             host_reveal_audit_location
         ])
         .run(tauri::generate_context!())

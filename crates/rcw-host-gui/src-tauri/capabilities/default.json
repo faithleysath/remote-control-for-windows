@@ -12,6 +12,7 @@
     "allow-host-restart-listener",
     "allow-host-copy-connection-info",
     "allow-host-close-current-session",
+    "allow-host-cancel-exec-task",
     "allow-host-reveal-audit-location",
     "core:event:default"
   ]

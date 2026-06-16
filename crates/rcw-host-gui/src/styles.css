@@ -155,6 +155,7 @@ select:focus {
 }
 
 .status-pill.warn,
+.result.warn,
 .banner.warn {
   background: #fff1c2;
   color: #745200;
@@ -172,6 +173,11 @@ select:focus {
   color: #4f5d59;
 }
 
+.result.idle {
+  background: #e8edec;
+  color: #4f5d59;
+}
+
 .banner {
   border-radius: 6px;
   margin: 0 0 18px;
@@ -182,7 +188,8 @@ select:focus {
 .summary-grid,
 .two-column,
 .settings-layout,
-.audit-layout {
+.audit-layout,
+.task-layout {
   display: grid;
   gap: 14px;
 }
@@ -198,6 +205,11 @@ select:focus {
 
 .audit-layout {
   grid-template-columns: 320px minmax(0, 1fr);
+  align-items: start;
+}
+
+.task-layout {
+  grid-template-columns: minmax(320px, 0.74fr) minmax(0, 1fr);
   align-items: start;
 }
 
@@ -358,7 +370,8 @@ dd {
 
 .events ul,
 .auth-list,
-.audit-list {
+.audit-list,
+.task-list {
   display: grid;
   gap: 8px;
   margin: 0;
@@ -381,6 +394,63 @@ dd {
 
 .event-row {
   grid-template-columns: minmax(154px, 0.65fr) minmax(150px, 0.55fr) minmax(180px, 1fr);
+}
+
+.task-list-panel,
+.task-detail-panel {
+  min-width: 0;
+}
+
+.task-count {
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #e8edec;
+  color: #4f5d59;
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.task-row {
+  display: grid;
+  width: 100%;
+  min-height: 72px;
+  gap: 8px;
+  border: 1px solid #d7dddd;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+  text-align: left;
+}
+
+.task-row:hover:not(:disabled),
+.task-row.selected {
+  border-color: #19746c;
+  background: #f3faf8;
+}
+
+.task-row-main,
+.task-row-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.task-row-main {
+  justify-content: space-between;
+}
+
+.task-row-main strong,
+.task-row-meta code,
+.task-row-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-row-meta {
+  flex-wrap: wrap;
+  color: #66736f;
+  font-size: 0.84rem;
 }
 
 .auth-row {
@@ -520,12 +590,13 @@ dd {
 
   .topbar,
   .panel-heading,
-  .summary-grid,
-  .two-column,
-  .settings-layout,
-  .audit-layout,
-  .event-row,
-  .auth-row {
+    .summary-grid,
+    .two-column,
+    .settings-layout,
+    .audit-layout,
+    .task-layout,
+    .event-row,
+    .auth-row {
     grid-template-columns: 1fr;
   }
 
