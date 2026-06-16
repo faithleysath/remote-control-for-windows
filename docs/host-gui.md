@@ -31,6 +31,8 @@ npm run tauri:build:windows:x64
 npm run tauri:build:windows:arm64
 ```
 
+GUI 依赖 Tauri/WebView2，不启用 `RUSTFLAGS='-C target-feature=+crt-static'`。控制台 `rcw-host.exe` 仍使用静态 CRT 构建；GUI 产物需要按 Windows 桌面应用方式验证 WebView2 和 MSVC CRT 运行时环境。
+
 GUI 复用 `rcw-host-core` 的配置解析：
 
 - `RCW_SERVER_URL` 或编译期 `RCW_EMBED_SERVER_URL` 提供中继服务器地址。

@@ -163,7 +163,8 @@ npm packages:
 发布 `rcw-host.exe` 或 `rcw-host-gui.exe` 前确认：
 
 - 文件是 Windows x86-64 PE 可执行文件。
-- 静态 CRT 构建在干净 Windows 环境中不依赖 `VCRUNTIME140.dll`。
+- 控制台 `rcw-host.exe` 使用静态 CRT 构建，在干净 Windows 环境中不依赖 `VCRUNTIME140.dll`。
+- GUI `rcw-host-gui.exe` 使用 Tauri/WebView2 的 MSVC CRT 链接模型，不启用 `crt-static`；验证时应确认目标 Windows 环境具备 WebView2 Runtime 和 VC++ 运行库。
 - host 能从交互桌面启动并连接中继。
 - 截图和输入操作在交互桌面中测试过，而不只是 session 0 或非交互服务上下文。
 - GUI 包还应至少完成窗口启动、概览页渲染、启动/停止/重连和基础 tab 切换 smoke。
