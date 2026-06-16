@@ -290,6 +290,64 @@ async fn host_cancel_exec_task(
 }
 
 #[tauri::command]
+async fn host_cancel_transfer_task(
+    request_id: String,
+    state: State<'_, GuiState>,
+) -> CommandResult<HostActionOutcome> {
+    let request_id = request_id.trim().to_owned();
+    if request_id.is_empty() {
+        return Err("request id is required".to_owned());
+    }
+
+    let outcome = {
+        let service = state.service.lock().await;
+        let outcome = service
+            .cancel_transfer_task(request_id.clone())
+            .await
+            .map_err(to_command_error)?;
+        HostActionOutcome {
+            changed: outcome.requested,
+            message: if outcome.requested {
+                format!("Transfer task {} cancel requested", outcome.request_id)
+            } else {
+                format!("Transfer task {request_id} was not running")
+            },
+            snapshot: service.snapshot(),
+        }
+    };
+    Ok(outcome)
+}
+
+#[tauri::command]
+async fn host_close_tunnel(
+    tunnel_id: String,
+    state: State<'_, GuiState>,
+) -> CommandResult<HostActionOutcome> {
+    let tunnel_id = tunnel_id.trim().to_owned();
+    if tunnel_id.is_empty() {
+        return Err("tunnel id is required".to_owned());
+    }
+
+    let outcome = {
+        let service = state.service.lock().await;
+        let outcome = service
+            .close_tunnel(tunnel_id.clone())
+            .await
+            .map_err(to_command_error)?;
+        HostActionOutcome {
+            changed: outcome.closed,
+            message: if outcome.closed {
+                format!("Tunnel {} closed", outcome.tunnel_id)
+            } else {
+                format!("Tunnel {tunnel_id} was not active")
+            },
+            snapshot: service.snapshot(),
+        }
+    };
+    Ok(outcome)
+}
+
+#[tauri::command]
 async fn host_copy_connection_info(state: State<'_, GuiState>) -> CommandResult<HostCopyOutcome> {
     let service = state.service.lock().await;
     match service.copy_connection_info() {
@@ -346,6 +404,8 @@ fn main() {
             host_copy_connection_info,
             host_close_current_session,
             host_cancel_exec_task,
+            host_cancel_transfer_task,
+            host_close_tunnel,
             host_reveal_audit_location
         ])
         .run(tauri::generate_context!())

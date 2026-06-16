@@ -70,6 +70,20 @@ struct ReverseListenerConfig {
     cancel_rx: watch::Receiver<bool>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum HostTunnelEndpointRole {
+    Listener,
+    Target,
+}
+
+struct StreamPumpConfig {
+    session_id: Option<String>,
+    tunnel_id: String,
+    stream_id: String,
+    stream: TcpStream,
+    endpoint_role: HostTunnelEndpointRole,
+}
+
 pub(crate) fn prune_finished_tunnel_tasks(tunnels: &mut HostTunnelTasks) {
     tunnels.retain(|_, tunnel| !tunnel.handle.is_finished());
 }
@@ -118,6 +132,7 @@ pub(crate) async fn abort_tunnel_streams_for_session(
 }
 
 pub(crate) async fn close_tunnel_locally(
+    context: &HostContext,
     tunnels: &mut HostTunnelTasks,
     streams: &HostTunnelStreams,
     tunnel_id: &str,
@@ -136,6 +151,11 @@ pub(crate) async fn close_tunnel_locally(
     for key in stream_ids {
         if let Some(stream) = streams.remove(&key) {
             stream.handle.abort();
+            context.state.record_tunnel_stream_closed(
+                tunnel_id.to_owned(),
+                stream.session_id.clone(),
+                Some("tunnel_closed".to_owned()),
+            );
             closed = true;
         }
     }
@@ -208,8 +228,18 @@ pub(crate) async fn handle_tunnel_open(
         let listener = match TcpListener::bind(&bind_addr).await {
             Ok(listener) => listener,
             Err(err) => {
-                let failed =
-                    failed_tunnel_info(&tunnel_id, session_id.clone(), &payload, err.to_string());
+                let error_message = err.to_string();
+                let failed = failed_tunnel_info(
+                    &tunnel_id,
+                    session_id.clone(),
+                    &payload,
+                    error_message.clone(),
+                );
+                context.state.record_tunnel_failed(
+                    tunnel_id.clone(),
+                    session_id.clone(),
+                    error_message.clone(),
+                );
                 append_tunnel_audit(
                     context,
                     TunnelAudit {
@@ -221,7 +251,7 @@ pub(crate) async fn handle_tunnel_open(
                         result: "failed",
                         args_summary: Some(tunnel_open_args_summary(&payload)),
                         error_code: Some(format!("{:?}", ErrorCode::InvalidPath)),
-                        error_message: Some(err.to_string()),
+                        error_message: Some(error_message),
                     },
                 );
                 send_open_result(sink, request_id, session_id, false, failed).await?;
@@ -284,7 +314,7 @@ pub(crate) async fn handle_tunnel_close(
     let request_id = message.request_id.clone();
     let session_id = message.session_id.clone();
     let payload: TunnelClosePayload = message.payload_as()?;
-    close_tunnel_locally(tunnels, streams, &payload.tunnel_id).await;
+    close_tunnel_locally(context, tunnels, streams, &payload.tunnel_id).await;
     append_tunnel_audit(
         context,
         TunnelAudit {
@@ -382,10 +412,13 @@ pub(crate) async fn handle_tunnel_stream_open(
         context.clone(),
         sink.clone(),
         streams,
-        session_id.clone(),
-        payload.tunnel_id.clone(),
-        payload.stream_id.clone(),
-        stream,
+        StreamPumpConfig {
+            session_id: session_id.clone(),
+            tunnel_id: payload.tunnel_id.clone(),
+            stream_id: payload.stream_id.clone(),
+            stream,
+            endpoint_role: HostTunnelEndpointRole::Target,
+        },
     )
     .await;
     send_stream_open_result(
@@ -401,7 +434,7 @@ pub(crate) async fn handle_tunnel_stream_open(
 }
 
 pub(crate) async fn handle_tunnel_stream_open_result(
-    _context: &HostContext,
+    context: &HostContext,
     streams: &HostTunnelStreams,
     message: WireMessage,
 ) -> Result<()> {
@@ -411,6 +444,11 @@ pub(crate) async fn handle_tunnel_stream_open_result(
         let mut streams = streams.lock().await;
         if let Some(stream) = streams.remove(&key) {
             stream.handle.abort();
+            context.state.record_tunnel_stream_closed(
+                payload.tunnel_id,
+                stream.session_id,
+                payload.message,
+            );
         }
     }
     Ok(())
@@ -429,6 +467,7 @@ pub(crate) async fn handle_tunnel_stream_eof(
 }
 
 pub(crate) async fn handle_tunnel_stream_reset(
+    context: &HostContext,
     streams: &HostTunnelStreams,
     message: WireMessage,
 ) -> Result<()> {
@@ -436,6 +475,12 @@ pub(crate) async fn handle_tunnel_stream_reset(
     let mut streams = streams.lock().await;
     if let Some(stream) = streams.remove(&stream_key(&payload.tunnel_id, &payload.stream_id)) {
         stream.handle.abort();
+        drop(streams);
+        context.state.record_tunnel_stream_closed(
+            payload.tunnel_id,
+            stream.session_id,
+            payload.reason,
+        );
     }
     Ok(())
 }
@@ -494,10 +539,13 @@ fn spawn_reverse_listener(
                         context.clone(),
                         sink.clone(),
                         &streams,
-                        session_id.clone(),
-                        tunnel_id.clone(),
-                        stream_id.clone(),
-                        stream,
+                        StreamPumpConfig {
+                            session_id: session_id.clone(),
+                            tunnel_id: tunnel_id.clone(),
+                            stream_id: stream_id.clone(),
+                            stream,
+                            endpoint_role: HostTunnelEndpointRole::Listener,
+                        },
                     ).await;
                     append_tunnel_audit(
                         &context,
@@ -531,16 +579,24 @@ async fn spawn_stream_pump(
     context: HostContext,
     sink: SharedWsSink,
     streams: &HostTunnelStreams,
-    session_id: Option<String>,
-    tunnel_id: String,
-    stream_id: String,
-    stream: TcpStream,
+    config: StreamPumpConfig,
 ) {
+    let StreamPumpConfig {
+        session_id,
+        tunnel_id,
+        stream_id,
+        stream,
+        endpoint_role,
+    } = config;
     let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(64);
     let key = stream_key(&tunnel_id, &stream_id);
     let task_tunnel_id = tunnel_id.clone();
     let task_stream_id = stream_id.clone();
     let task_session_id = session_id.clone();
+    let from_listener = matches!(endpoint_role, HostTunnelEndpointRole::Listener);
+    context
+        .state
+        .record_tunnel_stream_opened(tunnel_id.clone(), session_id.clone());
     let handle = tokio::spawn(async move {
         let (mut reader, mut writer) = stream.into_split();
         let mut read_buffer = vec![0_u8; TUNNEL_COPY_BUFFER_SIZE];
@@ -553,6 +609,12 @@ async fn spawn_stream_pump(
                             break;
                         }
                         Ok(n) => {
+                            context.state.record_tunnel_bytes(
+                                task_tunnel_id.clone(),
+                                task_session_id.clone(),
+                                from_listener,
+                                n,
+                            );
                             let frame = TunnelDataFrame {
                                 tunnel_id: task_tunnel_id.clone(),
                                 stream_id: task_stream_id.clone(),
@@ -583,6 +645,12 @@ async fn spawn_stream_pump(
                             let _ = writer.shutdown().await;
                         }
                         Some(bytes) => {
+                            context.state.record_tunnel_bytes(
+                                task_tunnel_id.clone(),
+                                task_session_id.clone(),
+                                !from_listener,
+                                bytes.len(),
+                            );
                             if writer.write_all(&bytes).await.is_err() {
                                 let _ = send_stream_control(&sink, task_session_id.clone(), TYPE_TUNNEL_STREAM_RESET, &task_tunnel_id, &task_stream_id, Some("tcp write failed".to_owned())).await;
                                 break;
@@ -598,7 +666,7 @@ async fn spawn_stream_pump(
             TunnelAudit {
                 event: "tunnel.stream_closed",
                 request_id: Some(task_stream_id.clone()),
-                session_id: task_session_id,
+                session_id: task_session_id.clone(),
                 task_id: Some(task_stream_id),
                 command_kind: "tunnel.stream_closed",
                 result: "closed",
@@ -609,6 +677,11 @@ async fn spawn_stream_pump(
                 error_code: None,
                 error_message: None,
             },
+        );
+        context.state.record_tunnel_stream_closed(
+            task_tunnel_id,
+            task_session_id,
+            Some("stream_closed".to_owned()),
         );
     });
     let mut streams = streams.lock().await;

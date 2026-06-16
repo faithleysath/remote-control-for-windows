@@ -27,6 +27,7 @@ use crate::{
     commands::{cancel_command_task, execute_command, prune_finished_command_tasks, CommandTasks},
     output::{close_shared_sink, send_error, send_json, shared_sink, SharedWsSink},
     platform,
+    state::HostTransferCompletion,
     tunnel::{
         abort_tunnel_streams, abort_tunnel_streams_for_session, abort_tunnel_tasks,
         close_tunnel_locally, handle_tunnel_close, handle_tunnel_data, handle_tunnel_open,
@@ -385,7 +386,7 @@ async fn handle_server_message(
             handle_tunnel_stream_eof(runtime.tunnel_streams, message).await?;
         }
         TYPE_TUNNEL_STREAM_RESET => {
-            handle_tunnel_stream_reset(runtime.tunnel_streams, message).await?;
+            handle_tunnel_stream_reset(context, runtime.tunnel_streams, message).await?;
         }
         other => {
             warn!("ignored server message type {other}");
@@ -416,9 +417,13 @@ async fn handle_host_control_request(
             Ok(())
         }
         HostControlRequest::CloseTunnel { tunnel_id, respond } => {
-            let closed =
-                close_tunnel_locally(runtime.tunnel_tasks, runtime.tunnel_streams, &tunnel_id)
-                    .await;
+            let closed = close_tunnel_locally(
+                context,
+                runtime.tunnel_tasks,
+                runtime.tunnel_streams,
+                &tunnel_id,
+            )
+            .await;
             if closed {
                 context.state.record_tunnel_closed(
                     tunnel_id.clone(),
@@ -556,13 +561,18 @@ fn abort_command_tasks(context: &HostContext, command_tasks: &mut CommandTasks) 
 
 fn abort_uploads(context: &HostContext, uploads: &mut HashMap<String, UploadState>) {
     for (request_id, upload) in uploads.drain() {
-        context.state.record_transfer_completed(
-            request_id,
-            upload.session_id.clone(),
-            HostTaskStatus::Cancelled,
-            None,
-            "listener_stopped".to_owned(),
-        );
+        context
+            .state
+            .record_transfer_completed(HostTransferCompletion {
+                request_id,
+                session_id: upload.session_id.clone(),
+                status: HostTaskStatus::Cancelled,
+                bytes_transferred: None,
+                duration_ms: None,
+                result: "listener_stopped".to_owned(),
+                sha256: None,
+                error_message: Some("listener stopped".to_owned()),
+            });
     }
 }
 

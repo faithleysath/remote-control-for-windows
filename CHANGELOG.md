@@ -6,6 +6,9 @@
 
 - GUI 新增 Exec 任务 tab，展示 exec 任务列表、脱敏参数/CWD 摘要、状态、耗时、exit code、stdout/stderr 字节统计和错误摘要，并支持复制 request/session id 与取消 running exec 任务。
 - `HostSnapshot` 的 exec 任务可观测字段补齐，但仍不在 host GUI snapshot 中缓存 stdout/stderr 原文；Tauri 权限只新增窄 `host_cancel_exec_task` command。
+- GUI 新增传输任务 tab，展示 upload/download 的脱敏路径摘要、size、transferred bytes、progress、speed、sha256、duration、result/error，并支持复制 request/task/path 摘要和取消 running transfer。
+- GUI 新增隧道 tab，展示 local/remote tunnel 的 endpoint、status、stream 数、bytes in/out、opened/idle 时间、close reason/error，并支持复制 tunnel id/endpoint 和关闭 active tunnel。
+- `HostSnapshot` 的 transfer/tunnel 可观测字段补齐，download 发送 chunk 时会更新 host 侧传输进度，tunnel stream pump 会更新 host 侧 stream 数和字节计数；Tauri 权限新增窄 `host_cancel_transfer_task` / `host_close_tunnel` command。
 
 ## 0.1.9 - 2026-06-16
 
@@ -14,7 +17,7 @@
 - 暴露 host 生命周期控制 API，支持启动、停止、重启 listener、使用新配置重启、结束当前 session、取消任务和关闭 tunnel；新增 `host.session_close` / `host.session_close_result`，协议版本提升到 v6。
 - 升级 host 结构化审计和脱敏策略，覆盖 session、exec、input、screenshot、windows、upload/download 和 tunnel 事件；上传审计保留 controller 传入的 `audit_label`。
 - 新增 `rcw-host-gui` Tauri v2 工程和最小安全权限基线，只开放窄 Tauri command 与 `host-event` 事件通道，不启用 shell/fs 插件或任意文件系统 scope。
-- 实现 GUI 概览、会话、审计和设置页 MVP，支持复制连接信息、启动/停止/重连 listener、结束会话、保存 GUI 设置、查看/过滤运行期事件时间线、复制 audit path 和显示 audit 文件位置；独立 exec/transfer/tunnel 管理 tab、托盘和安装包仍在后续 #19-#24。
+- 实现 GUI 概览、会话、审计和设置页 MVP，支持复制连接信息、启动/停止/重连 listener、结束会话、保存 GUI 设置、查看/过滤运行期事件时间线、复制 audit path 和显示 audit 文件位置；当时仍把独立 exec/transfer/tunnel 管理 tab、托盘和安装包留给后续 #19-#24。
 - CI 安装 Tauri Linux 依赖并检查 GUI 前端构建；发布 workflow 增加 `rcw-host-gui` Windows x86-64/arm64 artifact，GUI Windows 构建命令固化为 package script。
 - 发布 workflow 的 GUI Windows 构建显式安装 `llvm-rc`，避免 Tauri Windows resource 生成在干净 GitHub runner 上失败；GUI/WebView2 构建不启用 `crt-static`，以匹配 Tauri/WebView2 的 MSVC CRT 链接模型。
 - 修复 MCP 本地 tunnel listener 清理，关闭 forward 时释放本地监听端口。

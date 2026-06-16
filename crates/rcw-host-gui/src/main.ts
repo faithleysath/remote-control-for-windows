@@ -27,7 +27,7 @@ type HostEventKind =
   | "tunnel_closed"
   | "error_recorded";
 
-type Tab = "overview" | "session" | "exec" | "audit" | "settings";
+type Tab = "overview" | "session" | "exec" | "transfer" | "tunnels" | "audit" | "settings";
 type NoticeTone = "ok" | "warn" | "bad";
 type AuditTypeFilter =
   | "all"
@@ -86,9 +86,14 @@ interface HostTransferTask {
   started_at: string;
   finished_at?: string;
   size?: number;
+  remote_path_summary?: string;
+  local_path_summary?: string;
+  sha256?: string;
   bytes_transferred: number;
+  duration_ms?: number;
   result?: string;
   summary?: string;
+  error_message?: string;
 }
 
 interface HostTunnelTask {
@@ -102,9 +107,13 @@ interface HostTunnelTask {
   status: string;
   opened_at: string;
   last_activity_at: string;
+  idle_timeout_ms: number;
+  bytes_from_listener: number;
+  bytes_from_target: number;
   active_streams: number;
   total_streams: number;
   close_reason?: string;
+  error_message?: string;
 }
 
 interface HostSnapshot {
@@ -198,6 +207,8 @@ interface AppState {
   auditFilters: AuditFilters;
   events: HostEvent[];
   selectedExecRequestId: string | null;
+  selectedTransferRequestId: string | null;
+  selectedTunnelId: string | null;
   loadError: string | null;
   notice: { tone: NoticeTone; text: string } | null;
   loading: boolean;
@@ -222,6 +233,8 @@ const state: AppState = {
   },
   events: [],
   selectedExecRequestId: null,
+  selectedTransferRequestId: null,
+  selectedTunnelId: null,
   loadError: null,
   notice: null,
   loading: true,
@@ -286,6 +299,75 @@ function formatBytes(value?: number): string {
     return "0 B";
   }
   return `${new Intl.NumberFormat().format(value)} B`;
+}
+
+function formatScaledBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let current = value;
+  let unitIndex = 0;
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024;
+    unitIndex += 1;
+  }
+  const digits = unitIndex === 0 ? 0 : current >= 10 ? 1 : 2;
+  return `${current.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatRate(bytesPerSecond?: number): string {
+  if (bytesPerSecond === undefined || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+    return "0 B/s";
+  }
+  return `${formatScaledBytes(bytesPerSecond)}/s`;
+}
+
+function formatProgress(bytesTransferred: number, size?: number): string {
+  if (size === undefined || size <= 0) {
+    return formatBytes(bytesTransferred);
+  }
+  const ratio = Math.min(1, Math.max(0, bytesTransferred / size));
+  const percent = ratio * 100;
+  const digits = percent >= 10 ? 0 : 1;
+  return `${percent.toFixed(digits)}% (${formatBytes(bytesTransferred)} / ${formatBytes(size)})`;
+}
+
+function formatElapsedSince(value?: string): string {
+  if (!value) {
+    return "0s";
+  }
+  const started = Date.parse(value);
+  if (Number.isNaN(started)) {
+    return value;
+  }
+  const elapsed = Math.max(0, Date.now() - started);
+  const seconds = Math.floor(elapsed / 1000);
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ${seconds % 60}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+function formatEndpoint(host: string, port: number): string {
+  return `${host}:${port}`;
+}
+
+function formatTransferDirection(direction: HostTransferTask["direction"]): string {
+  return direction === "upload" ? "Upload" : "Download";
+}
+
+function formatTunnelDirection(direction: HostTunnelTask["direction"]): string {
+  return direction === "local" ? "Local" : "Remote";
 }
 
 function statusLabel(status?: ListenerStatus): string {
@@ -380,6 +462,58 @@ function selectedExecTask(tasks: HostCommandTask[]): HostCommandTask | null {
 
 function isExecRunning(task: HostCommandTask): boolean {
   return task.status === "running";
+}
+
+function sortedTransferTasks(snapshot: HostSnapshot | null): HostTransferTask[] {
+  return (snapshot?.transfers ?? [])
+    .slice()
+    .sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at));
+}
+
+function selectedTransferTask(tasks: HostTransferTask[]): HostTransferTask | null {
+  if (tasks.length === 0) {
+    return null;
+  }
+  return (
+    tasks.find((task) => task.request_id === state.selectedTransferRequestId) ??
+    tasks.find((task) => task.status === "running") ??
+    tasks[0]
+  );
+}
+
+function isTransferRunning(task: HostTransferTask): boolean {
+  return task.status === "running";
+}
+
+function transferSpeed(task: HostTransferTask): number | undefined {
+  const elapsedMs =
+    task.duration_ms ??
+    (Number.isNaN(Date.parse(task.started_at)) ? undefined : Math.max(1, Date.now() - Date.parse(task.started_at)));
+  if (!elapsedMs || elapsedMs <= 0) {
+    return undefined;
+  }
+  return (task.bytes_transferred * 1000) / elapsedMs;
+}
+
+function sortedTunnelTasks(snapshot: HostSnapshot | null): HostTunnelTask[] {
+  return (snapshot?.tunnels ?? [])
+    .slice()
+    .sort((left, right) => Date.parse(right.opened_at) - Date.parse(left.opened_at));
+}
+
+function selectedTunnelTask(tasks: HostTunnelTask[]): HostTunnelTask | null {
+  if (tasks.length === 0) {
+    return null;
+  }
+  return (
+    tasks.find((task) => task.tunnel_id === state.selectedTunnelId) ??
+    tasks.find((task) => task.status === "active" || task.status === "opening") ??
+    tasks[0]
+  );
+}
+
+function isTunnelActive(task: HostTunnelTask): boolean {
+  return task.status === "active" || task.status === "opening";
 }
 
 function eventKey(event: HostEvent): string {
@@ -608,6 +742,8 @@ function renderTabs(): string {
     { id: "overview", label: "Overview" },
     { id: "session", label: "Session" },
     { id: "exec", label: "Exec" },
+    { id: "transfer", label: "Transfer" },
+    { id: "tunnels", label: "Tunnels" },
     { id: "audit", label: "Audit" },
     { id: "settings", label: "Settings" },
   ];
@@ -919,6 +1055,219 @@ function renderExecDetail(task: HostCommandTask): string {
   `;
 }
 
+function renderTransfers(snapshot: HostSnapshot | null): string {
+  const tasks = sortedTransferTasks(snapshot);
+  const selected = selectedTransferTask(tasks);
+  return `
+    <section class="task-layout" aria-label="Transfer tasks">
+      <div class="panel task-list-panel">
+        <div class="panel-heading">
+          <span class="section-label">Transfer tasks</span>
+          <span class="task-count">${escapeHtml(formatCount(tasks.length))}</span>
+        </div>
+        <div class="task-list">
+          ${
+            tasks.length > 0
+              ? tasks.map((task) => renderTransferTaskRow(task, selected?.request_id)).join("")
+              : `<div class="empty">No transfer tasks</div>`
+          }
+        </div>
+      </div>
+
+      <div class="panel task-detail-panel">
+        ${selected ? renderTransferDetail(selected) : `<div class="empty">Select a transfer task</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderTransferTaskRow(task: HostTransferTask, selectedRequestId?: string): string {
+  const selected = task.request_id === selectedRequestId;
+  const tone = statusTone(task.status);
+  return `
+    <button
+      class="task-row ${selected ? "selected" : ""}"
+      data-transfer-select="${escapeHtml(task.request_id)}"
+      type="button"
+    >
+      <span class="task-row-main">
+        <strong>${display(task.remote_path_summary ?? task.summary ?? formatTransferDirection(task.direction))}</strong>
+        <span class="result ${tone}">${escapeHtml(taskStatusLabel(task.status))}</span>
+      </span>
+      <span class="task-row-meta">
+        <span>${escapeHtml(formatTransferDirection(task.direction))}</span>
+        <span>${escapeHtml(formatProgress(task.bytes_transferred, task.size))}</span>
+        <code>${display(task.request_id)}</code>
+      </span>
+    </button>
+  `;
+}
+
+function renderTransferDetail(task: HostTransferTask): string {
+  const canCancel = isTransferRunning(task) && state.busyAction === null;
+  return `
+    <div class="panel-heading">
+      <span class="section-label">Transfer detail</span>
+      <div class="button-row">
+        <button id="copy-transfer-request" type="button" ${disabledAttr(state.busyAction !== null)}>
+          ${busyLabel("copy-transfer-request", "Copy Request")}
+        </button>
+        <button id="copy-transfer-task" type="button" ${disabledAttr(state.busyAction !== null)}>
+          ${busyLabel("copy-transfer-task", "Copy Task")}
+        </button>
+        <button
+          id="copy-transfer-path"
+          type="button"
+          ${disabledAttr(!task.remote_path_summary || state.busyAction !== null)}
+        >
+          ${busyLabel("copy-transfer-path", "Copy Path")}
+        </button>
+        <button id="cancel-transfer-task" type="button" ${disabledAttr(!canCancel)}>
+          ${busyLabel(`cancel-transfer:${task.request_id}`, "Cancel")}
+        </button>
+      </div>
+    </div>
+    <dl>
+      ${renderDataRow("Request ID", task.request_id, { code: true })}
+      ${renderDataRow("Task ID", task.request_id, { code: true })}
+      ${renderDataRow("Session ID", task.session_id ?? "None", { code: Boolean(task.session_id) })}
+      ${renderDataRow("Direction", formatTransferDirection(task.direction))}
+      ${renderDataRow("Remote path", task.remote_path_summary ?? "None")}
+      ${renderDataRow("Local path", task.local_path_summary ?? "None")}
+      ${renderDataRow("Size", task.size === undefined ? "Unknown" : formatBytes(task.size))}
+      ${renderDataRow("Transferred", formatBytes(task.bytes_transferred))}
+      ${renderDataRow("Progress", formatProgress(task.bytes_transferred, task.size))}
+      ${renderDataRow("Speed", formatRate(transferSpeed(task)))}
+      ${renderDataRow("SHA-256", task.sha256 ?? "None", { code: Boolean(task.sha256) })}
+      ${renderDataRow("Status", taskStatusLabel(task.status))}
+      ${renderDataRow("Started", formatDate(task.started_at))}
+      ${renderDataRow("Finished", formatDate(task.finished_at))}
+      ${renderDataRow("Duration", task.duration_ms === undefined ? "Pending" : `${task.duration_ms}ms`)}
+      ${renderDataRow("Result", task.result ?? "Pending")}
+      ${renderDataRow("Error", task.error_message ?? "None")}
+    </dl>
+    <div class="progress-track" aria-label="Transfer progress">
+      <span style="width: ${escapeHtml(String(progressWidth(task)))}%"></span>
+    </div>
+    <details class="audit-detail">
+      <summary>Task JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(task, null, 2))}</pre>
+    </details>
+  `;
+}
+
+function progressWidth(task: HostTransferTask): number {
+  if (task.size === undefined || task.size <= 0) {
+    return task.status === "completed" ? 100 : 0;
+  }
+  return Math.round(Math.min(100, Math.max(0, (task.bytes_transferred / task.size) * 100)));
+}
+
+function renderTunnels(snapshot: HostSnapshot | null): string {
+  const tasks = sortedTunnelTasks(snapshot);
+  const selected = selectedTunnelTask(tasks);
+  return `
+    <section class="task-layout" aria-label="Tunnels">
+      <div class="panel task-list-panel">
+        <div class="panel-heading">
+          <span class="section-label">Tunnels</span>
+          <span class="task-count">${escapeHtml(formatCount(tasks.length))}</span>
+        </div>
+        <div class="task-list">
+          ${
+            tasks.length > 0
+              ? tasks.map((task) => renderTunnelTaskRow(task, selected?.tunnel_id)).join("")
+              : `<div class="empty">No tunnels</div>`
+          }
+        </div>
+      </div>
+
+      <div class="panel task-detail-panel">
+        ${selected ? renderTunnelDetail(selected) : `<div class="empty">Select a tunnel</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function renderTunnelTaskRow(task: HostTunnelTask, selectedTunnelId?: string): string {
+  const selected = task.tunnel_id === selectedTunnelId;
+  const tone = tunnelStatusTone(task.status);
+  return `
+    <button
+      class="task-row ${selected ? "selected" : ""}"
+      data-tunnel-select="${escapeHtml(task.tunnel_id)}"
+      type="button"
+    >
+      <span class="task-row-main">
+        <strong>${display(formatEndpoint(task.listen_addr, task.listen_port))}</strong>
+        <span class="result ${tone}">${escapeHtml(taskStatusLabel(task.status))}</span>
+      </span>
+      <span class="task-row-meta">
+        <span>${escapeHtml(formatTunnelDirection(task.direction))}</span>
+        <span>${escapeHtml(formatEndpoint(task.target_host, task.target_port))}</span>
+        <code>${display(task.tunnel_id)}</code>
+      </span>
+    </button>
+  `;
+}
+
+function tunnelStatusTone(status?: string): "ok" | "warn" | "bad" | "idle" {
+  if (status === "active") {
+    return "ok";
+  }
+  if (status === "opening" || status === "closing") {
+    return "warn";
+  }
+  if (status === "failed") {
+    return "bad";
+  }
+  return "idle";
+}
+
+function renderTunnelDetail(task: HostTunnelTask): string {
+  const canClose = isTunnelActive(task) && state.busyAction === null;
+  const endpoint = formatEndpoint(task.listen_addr, task.listen_port);
+  const target = formatEndpoint(task.target_host, task.target_port);
+  return `
+    <div class="panel-heading">
+      <span class="section-label">Tunnel detail</span>
+      <div class="button-row">
+        <button id="copy-tunnel-id" type="button" ${disabledAttr(state.busyAction !== null)}>
+          ${busyLabel("copy-tunnel-id", "Copy ID")}
+        </button>
+        <button id="copy-tunnel-endpoint" type="button" ${disabledAttr(state.busyAction !== null)}>
+          ${busyLabel("copy-tunnel-endpoint", "Copy Endpoint")}
+        </button>
+        <button id="close-tunnel" type="button" ${disabledAttr(!canClose)}>
+          ${busyLabel(`close-tunnel:${task.tunnel_id}`, "Close")}
+        </button>
+      </div>
+    </div>
+    <dl>
+      ${renderDataRow("Tunnel ID", task.tunnel_id, { code: true })}
+      ${renderDataRow("Session ID", task.session_id ?? "None", { code: Boolean(task.session_id) })}
+      ${renderDataRow("Direction", formatTunnelDirection(task.direction))}
+      ${renderDataRow("Listen", endpoint, { code: true })}
+      ${renderDataRow("Target", target, { code: true })}
+      ${renderDataRow("Status", taskStatusLabel(task.status))}
+      ${renderDataRow("Active streams", formatCount(task.active_streams))}
+      ${renderDataRow("Total streams", formatCount(task.total_streams))}
+      ${renderDataRow("Bytes in", formatBytes(task.bytes_from_listener))}
+      ${renderDataRow("Bytes out", formatBytes(task.bytes_from_target))}
+      ${renderDataRow("Opened", formatDate(task.opened_at))}
+      ${renderDataRow("Last activity", formatDate(task.last_activity_at))}
+      ${renderDataRow("Idle time", formatElapsedSince(task.last_activity_at))}
+      ${renderDataRow("Idle timeout", `${task.idle_timeout_ms}ms`)}
+      ${renderDataRow("Close reason", task.close_reason ?? "None")}
+      ${renderDataRow("Error", task.error_message ?? "None")}
+    </dl>
+    <details class="audit-detail">
+      <summary>Tunnel JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(task, null, 2))}</pre>
+    </details>
+  `;
+}
+
 function renderAudit(): string {
   const hasAuditPath = Boolean(state.snapshot?.audit_path);
   return `
@@ -1020,6 +1369,12 @@ function renderContent(): string {
   if (state.activeTab === "exec") {
     return renderExec(state.snapshot);
   }
+  if (state.activeTab === "transfer") {
+    return renderTransfers(state.snapshot);
+  }
+  if (state.activeTab === "tunnels") {
+    return renderTunnels(state.snapshot);
+  }
   if (state.activeTab === "audit") {
     return renderAudit();
   }
@@ -1070,6 +1425,12 @@ function bindUi(): void {
   bindClick("#tab-exec", () => {
     switchTab("exec");
   });
+  bindClick("#tab-transfer", () => {
+    switchTab("transfer");
+  });
+  bindClick("#tab-tunnels", () => {
+    switchTab("tunnels");
+  });
   bindClick("#tab-audit", () => {
     switchTab("audit");
   });
@@ -1094,6 +1455,8 @@ function bindUi(): void {
 
   bindSettingsForm();
   bindExecTasks();
+  bindTransferTasks();
+  bindTunnels();
   bindAuditFilters();
 }
 
@@ -1196,6 +1559,72 @@ function bindExecTasks(): void {
   });
 }
 
+function bindTransferTasks(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-transfer-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTransferRequestId = button.dataset.transferSelect ?? null;
+      render();
+    });
+  });
+
+  bindClick("#copy-transfer-request", () => {
+    const task = selectedTransferTask(sortedTransferTasks(state.snapshot));
+    if (task) {
+      void copyText("copy-transfer-request", task.request_id, "Transfer request id copied");
+    }
+  });
+  bindClick("#copy-transfer-task", () => {
+    const task = selectedTransferTask(sortedTransferTasks(state.snapshot));
+    if (task) {
+      void copyText("copy-transfer-task", task.request_id, "Transfer task id copied");
+    }
+  });
+  bindClick("#copy-transfer-path", () => {
+    const task = selectedTransferTask(sortedTransferTasks(state.snapshot));
+    if (task?.remote_path_summary) {
+      void copyText("copy-transfer-path", task.remote_path_summary, "Transfer path summary copied");
+    }
+  });
+  bindClick("#cancel-transfer-task", () => {
+    const task = selectedTransferTask(sortedTransferTasks(state.snapshot));
+    if (task) {
+      void cancelTransferTask(task.request_id);
+    }
+  });
+}
+
+function bindTunnels(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-tunnel-select]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTunnelId = button.dataset.tunnelSelect ?? null;
+      render();
+    });
+  });
+
+  bindClick("#copy-tunnel-id", () => {
+    const task = selectedTunnelTask(sortedTunnelTasks(state.snapshot));
+    if (task) {
+      void copyText("copy-tunnel-id", task.tunnel_id, "Tunnel id copied");
+    }
+  });
+  bindClick("#copy-tunnel-endpoint", () => {
+    const task = selectedTunnelTask(sortedTunnelTasks(state.snapshot));
+    if (task) {
+      void copyText(
+        "copy-tunnel-endpoint",
+        `${formatEndpoint(task.listen_addr, task.listen_port)} -> ${formatEndpoint(task.target_host, task.target_port)}`,
+        "Tunnel endpoint copied",
+      );
+    }
+  });
+  bindClick("#close-tunnel", () => {
+    const task = selectedTunnelTask(sortedTunnelTasks(state.snapshot));
+    if (task) {
+      void closeTunnel(task.tunnel_id);
+    }
+  });
+}
+
 function bindTextInput(selector: string, update: (value: string) => void): void {
   const input = document.querySelector<HTMLInputElement>(selector);
   input?.addEventListener("input", () => {
@@ -1276,6 +1705,50 @@ async function cancelExecTask(requestId: string): Promise<void> {
     state.snapshot = outcome.snapshot;
     state.notice = { tone: outcome.changed ? "ok" : "warn", text: outcome.message };
     state.selectedExecRequestId = requestId;
+  } catch (error) {
+    state.notice = { tone: "bad", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
+async function cancelTransferTask(requestId: string): Promise<void> {
+  const action = `cancel-transfer:${requestId}`;
+  state.busyAction = action;
+  state.loadError = null;
+  state.notice = null;
+  render();
+
+  try {
+    const outcome = await invoke<HostActionOutcome>("host_cancel_transfer_task", {
+      requestId,
+    });
+    state.snapshot = outcome.snapshot;
+    state.notice = { tone: outcome.changed ? "ok" : "warn", text: outcome.message };
+    state.selectedTransferRequestId = requestId;
+  } catch (error) {
+    state.notice = { tone: "bad", text: error instanceof Error ? error.message : String(error) };
+  } finally {
+    state.busyAction = null;
+    render();
+  }
+}
+
+async function closeTunnel(tunnelId: string): Promise<void> {
+  const action = `close-tunnel:${tunnelId}`;
+  state.busyAction = action;
+  state.loadError = null;
+  state.notice = null;
+  render();
+
+  try {
+    const outcome = await invoke<HostActionOutcome>("host_close_tunnel", {
+      tunnelId,
+    });
+    state.snapshot = outcome.snapshot;
+    state.notice = { tone: outcome.changed ? "ok" : "warn", text: outcome.message };
+    state.selectedTunnelId = tunnelId;
   } catch (error) {
     state.notice = { tone: "bad", text: error instanceof Error ? error.message : String(error) };
   } finally {

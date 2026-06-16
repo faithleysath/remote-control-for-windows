@@ -22,15 +22,17 @@ use tracing::error;
 
 use crate::{
     audit::{
-        append_host_audit_record, command_audit_details, sanitize_audit_text, CommandAuditDetails,
-        HostAuditRecord,
+        append_host_audit_record, command_audit_details, path_summary, sanitize_audit_text,
+        CommandAuditDetails, HostAuditRecord,
     },
     output::{
         send_binary_chunks, send_complete, send_error, send_output, send_shared_complete,
         send_shared_complete_kind, send_shared_error, send_shared_output, SharedWsSink, WsSink,
     },
     platform,
-    state::{task_status_for_result, HostCommandCompletion},
+    state::{
+        task_status_for_result, HostCommandCompletion, HostTransferCompletion, HostTransferStart,
+    },
     HostContext, HostTaskStatus, HostTransferDirection,
 };
 
@@ -43,6 +45,16 @@ pub(crate) struct CommandTask {
     pub(crate) command: String,
     cancel_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
+}
+
+struct DownloadSend<'a> {
+    context: &'a HostContext,
+    request_id: &'a str,
+    session_id: Option<String>,
+    kind: BinaryKind,
+    path: &'a std::path::Path,
+    size: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
 }
 
 impl CommandTask {
@@ -178,10 +190,19 @@ async fn execute_command_inline(
             let complete = result.as_ref().ok().cloned();
             (result.map(|_| ()), complete)
         }
-        COMMAND_DOWNLOAD_BEGIN => (
-            command_download(sink, &request_id, session_id.clone(), payload.args, None).await,
-            None,
-        ),
+        COMMAND_DOWNLOAD_BEGIN => {
+            let result = command_download(
+                context,
+                sink,
+                &request_id,
+                session_id.clone(),
+                payload.args,
+                None,
+            )
+            .await;
+            let complete = result.as_ref().ok().cloned();
+            (result.map(|_| ()), complete)
+        }
         COMMAND_SCREENSHOT => (
             command_screenshot(sink, &request_id, session_id.clone(), payload.args).await,
             None,
@@ -361,17 +382,19 @@ async fn run_async_command_task(
             let complete = result.as_ref().ok().cloned();
             (result.map(|_| ()), complete)
         }
-        COMMAND_DOWNLOAD_BEGIN => (
-            command_download_shared(
+        COMMAND_DOWNLOAD_BEGIN => {
+            let result = command_download_shared(
+                &context,
                 &sink,
                 &request_id,
                 session_id.clone(),
                 payload.args,
                 Some(cancel_rx),
             )
-            .await,
-            None,
-        ),
+            .await;
+            let complete = result.as_ref().ok().cloned();
+            (result.map(|_| ()), complete)
+        }
         _ => (Err(anyhow!("unsupported async command")), None),
     };
 
@@ -468,12 +491,15 @@ fn record_task_started(
     size: Option<u64>,
 ) {
     if command == COMMAND_DOWNLOAD_BEGIN {
-        context.state.record_transfer_started(
-            request_id.to_owned(),
+        context.state.record_transfer_started(HostTransferStart {
+            request_id: request_id.to_owned(),
             session_id,
-            HostTransferDirection::Download,
+            direction: HostTransferDirection::Download,
             size,
-        );
+            remote_path_summary: details.path_summary.clone(),
+            local_path_summary: None,
+            sha256: details.sha256.clone(),
+        });
     } else {
         context.state.record_command_started(
             request_id.to_owned(),
@@ -511,13 +537,25 @@ struct CommandCompleteAudit<'a> {
 
 fn record_task_completed(context: &HostContext, completion: TaskCompletion<'_>) {
     if completion.command == COMMAND_DOWNLOAD_BEGIN {
-        context.state.record_transfer_completed(
-            completion.request_id.to_owned(),
-            completion.session_id,
-            completion.status,
-            completion.bytes_transferred,
-            completion.result,
-        );
+        let complete = completion.complete;
+        context
+            .state
+            .record_transfer_completed(HostTransferCompletion {
+                request_id: completion.request_id.to_owned(),
+                session_id: completion.session_id,
+                status: completion.status,
+                bytes_transferred: completion
+                    .bytes_transferred
+                    .or_else(|| complete.as_ref().and_then(|complete| complete.size)),
+                duration_ms: Some(completion.duration_ms),
+                result: completion.result,
+                sha256: complete
+                    .as_ref()
+                    .and_then(|complete| complete.sha256.clone()),
+                error_message: completion
+                    .error
+                    .map(|error| sanitize_audit_text(&error.to_string())),
+            });
     } else {
         context
             .state
@@ -793,89 +831,111 @@ async fn command_exec_shared(
 }
 
 async fn command_download(
+    context: &HostContext,
     sink: &mut WsSink,
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
     cancel_rx: Option<watch::Receiver<bool>>,
-) -> Result<()> {
+) -> Result<CommandCompletePayload> {
     let args: DownloadArgs = serde_json::from_value(args)?;
     let path = PathBuf::from(&args.remote_path);
     let size = fs::metadata(&path)?.len();
+    context
+        .state
+        .record_transfer_size(request_id.to_owned(), session_id.clone(), size);
     let sha256 = send_file_binary_chunks_cancellable(
         sink,
-        request_id,
-        BinaryKind::DownloadChunk,
-        &path,
-        size,
-        cancel_rx,
+        DownloadSend {
+            context,
+            request_id,
+            session_id: session_id.clone(),
+            kind: BinaryKind::DownloadChunk,
+            path: &path,
+            size,
+            cancel_rx,
+        },
     )
     .await?;
+    let complete = CommandCompletePayload {
+        ok: true,
+        exit_code: Some(0),
+        duration_ms: 0,
+        size: Some(size),
+        sha256: Some(sha256),
+        summary: Some(format!("read {}", path_summary(&args.remote_path))),
+    };
     crate::output::send_complete_kind(
         sink,
         rcw_common::protocol::TYPE_DOWNLOAD_COMPLETE,
         request_id,
         session_id,
-        CommandCompletePayload {
-            ok: true,
-            exit_code: Some(0),
-            duration_ms: 0,
-            size: Some(size),
-            sha256: Some(sha256),
-            summary: Some(format!("read {}", args.remote_path)),
-        },
+        complete.clone(),
     )
-    .await
+    .await?;
+    Ok(complete)
 }
 
 async fn command_download_shared(
+    context: &HostContext,
     sink: &SharedWsSink,
     request_id: &str,
     session_id: Option<String>,
     args: serde_json::Value,
     cancel_rx: Option<watch::Receiver<bool>>,
-) -> Result<()> {
+) -> Result<CommandCompletePayload> {
     let args: DownloadArgs = serde_json::from_value(args)?;
     let path = PathBuf::from(&args.remote_path);
     let size = fs::metadata(&path)?.len();
+    context
+        .state
+        .record_transfer_size(request_id.to_owned(), session_id.clone(), size);
     let sha256 = send_file_binary_chunks_shared_cancellable(
         sink,
-        request_id,
-        BinaryKind::DownloadChunk,
-        &path,
-        size,
-        cancel_rx,
+        DownloadSend {
+            context,
+            request_id,
+            session_id: session_id.clone(),
+            kind: BinaryKind::DownloadChunk,
+            path: &path,
+            size,
+            cancel_rx,
+        },
     )
     .await?;
+    let complete = CommandCompletePayload {
+        ok: true,
+        exit_code: Some(0),
+        duration_ms: 0,
+        size: Some(size),
+        sha256: Some(sha256),
+        summary: Some(format!("read {}", path_summary(&args.remote_path))),
+    };
     send_shared_complete_kind(
         sink,
         rcw_common::protocol::TYPE_DOWNLOAD_COMPLETE,
         request_id,
         session_id,
-        CommandCompletePayload {
-            ok: true,
-            exit_code: Some(0),
-            duration_ms: 0,
-            size: Some(size),
-            sha256: Some(sha256),
-            summary: Some(format!("read {}", args.remote_path)),
-        },
+        complete.clone(),
     )
-    .await
+    .await?;
+    Ok(complete)
 }
 
 async fn send_file_binary_chunks_cancellable(
     sink: &mut WsSink,
-    request_id: &str,
-    kind: BinaryKind,
-    path: &std::path::Path,
-    size: u64,
-    mut cancel_rx: Option<watch::Receiver<bool>>,
+    mut send: DownloadSend<'_>,
 ) -> Result<String> {
-    let mut reader =
-        rcw_common::transfer::FileBinaryFrameReader::new(path, size, request_id, kind)?;
+    let mut reader = rcw_common::transfer::FileBinaryFrameReader::new(
+        send.path,
+        send.size,
+        send.request_id,
+        send.kind,
+    )?;
     while let Some(frame) = reader.next_frame()? {
-        if cancel_rx
+        let bytes_transferred = reader.bytes_transferred();
+        if send
+            .cancel_rx
             .as_ref()
             .map(|cancel_rx| *cancel_rx.borrow())
             .unwrap_or(false)
@@ -885,15 +945,21 @@ async fn send_file_binary_chunks_cancellable(
         tokio::select! {
             result = sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)) => {
                 result?;
+                send.context.state.record_transfer_progress(
+                    send.request_id.to_owned(),
+                    send.session_id.clone(),
+                    bytes_transferred,
+                );
             }
             changed = async {
-                match cancel_rx.as_mut() {
+                match send.cancel_rx.as_mut() {
                     Some(cancel_rx) => cancel_rx.changed().await,
                     None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
                 }
             } => {
                 if changed.is_ok()
-                    && cancel_rx
+                    && send
+                        .cancel_rx
                         .as_ref()
                         .map(|cancel_rx| *cancel_rx.borrow())
                         .unwrap_or(false)
@@ -908,16 +974,18 @@ async fn send_file_binary_chunks_cancellable(
 
 async fn send_file_binary_chunks_shared_cancellable(
     sink: &SharedWsSink,
-    request_id: &str,
-    kind: BinaryKind,
-    path: &std::path::Path,
-    size: u64,
-    mut cancel_rx: Option<watch::Receiver<bool>>,
+    mut send: DownloadSend<'_>,
 ) -> Result<String> {
-    let mut reader =
-        rcw_common::transfer::FileBinaryFrameReader::new(path, size, request_id, kind)?;
+    let mut reader = rcw_common::transfer::FileBinaryFrameReader::new(
+        send.path,
+        send.size,
+        send.request_id,
+        send.kind,
+    )?;
     while let Some(frame) = reader.next_frame()? {
-        if cancel_rx
+        let bytes_transferred = reader.bytes_transferred();
+        if send
+            .cancel_rx
             .as_ref()
             .map(|cancel_rx| *cancel_rx.borrow())
             .unwrap_or(false)
@@ -930,15 +998,21 @@ async fn send_file_binary_chunks_shared_cancellable(
                 sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)).await
             } => {
                 result?;
+                send.context.state.record_transfer_progress(
+                    send.request_id.to_owned(),
+                    send.session_id.clone(),
+                    bytes_transferred,
+                );
             }
             changed = async {
-                match cancel_rx.as_mut() {
+                match send.cancel_rx.as_mut() {
                     Some(cancel_rx) => cancel_rx.changed().await,
                     None => std::future::pending::<Result<(), watch::error::RecvError>>().await,
                 }
             } => {
                 if changed.is_ok()
-                    && cancel_rx
+                    && send
+                        .cancel_rx
                         .as_ref()
                         .map(|cancel_rx| *cancel_rx.borrow())
                         .unwrap_or(false)

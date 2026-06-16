@@ -9,6 +9,8 @@ fn main() {
         "host_copy_connection_info",
         "host_close_current_session",
         "host_cancel_exec_task",
+        "host_cancel_transfer_task",
+        "host_close_tunnel",
         "host_reveal_audit_location",
     ];
 

@@ -20,8 +20,12 @@ use rcw_common::{
 use tracing::warn;
 
 use crate::{
-    audit::{append_host_audit_record, upload_audit_details, CommandAuditDetails, HostAuditRecord},
+    audit::{
+        append_host_audit_record, path_summary, upload_audit_details, CommandAuditDetails,
+        HostAuditRecord,
+    },
     output::{send_complete_kind, send_error, WsSink},
+    state::{HostTransferCompletion, HostTransferStart},
     HostContext, HostTaskStatus, HostTransferDirection,
 };
 
@@ -93,12 +97,15 @@ pub(crate) fn begin_upload(
             error_message: None,
         },
     );
-    context.state.record_transfer_started(
-        request_id.clone(),
-        message.session_id.clone(),
-        HostTransferDirection::Upload,
-        Some(args.size),
-    );
+    context.state.record_transfer_started(HostTransferStart {
+        request_id: request_id.clone(),
+        session_id: message.session_id.clone(),
+        direction: HostTransferDirection::Upload,
+        size: Some(args.size),
+        remote_path_summary: Some(path_summary(&args.remote_path)),
+        local_path_summary: None,
+        sha256: Some(args.sha256.clone()),
+    });
     uploads.insert(
         request_id,
         UploadState {
@@ -195,13 +202,18 @@ pub(crate) async fn handle_binary_frame(
 
     if let Some((session_id, audit_label, started_at, duration_ms, code, message)) = action {
         uploads.remove(&request_id);
-        context.state.record_transfer_completed(
-            request_id.clone(),
-            session_id.clone(),
-            HostTaskStatus::Failed,
-            None,
-            "failed".to_owned(),
-        );
+        context
+            .state
+            .record_transfer_completed(HostTransferCompletion {
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                status: HostTaskStatus::Failed,
+                bytes_transferred: None,
+                duration_ms: Some(duration_ms),
+                result: "failed".to_owned(),
+                sha256: None,
+                error_message: Some(message.clone()),
+            });
         let mut details =
             CommandAuditDetails::new(crate::audit::category_for_command(COMMAND_UPLOAD_BEGIN));
         details.args_summary = Some("upload chunk rejected".to_owned());
@@ -259,13 +271,18 @@ async fn finalize_upload(
     }
     if state.bytes_written != state.args.size {
         let details = upload_audit_details(&state.args);
-        context.state.record_transfer_completed(
-            request_id.to_owned(),
-            state.session_id.clone(),
-            HostTaskStatus::Failed,
-            Some(state.bytes_written),
-            "size_mismatch".to_owned(),
-        );
+        context
+            .state
+            .record_transfer_completed(HostTransferCompletion {
+                request_id: request_id.to_owned(),
+                session_id: state.session_id.clone(),
+                status: HostTaskStatus::Failed,
+                bytes_transferred: Some(state.bytes_written),
+                duration_ms: Some(state.started.elapsed().as_millis() as u64),
+                result: "size_mismatch".to_owned(),
+                sha256: None,
+                error_message: Some("upload size mismatch".to_owned()),
+            });
         append_upload_audit(
             context,
             UploadAudit {
@@ -297,13 +314,18 @@ async fn finalize_upload(
     let actual = std::mem::replace(&mut state.hasher, Sha256Accumulator::new()).finalize();
     if actual != state.args.sha256 {
         let details = upload_audit_details(&state.args);
-        context.state.record_transfer_completed(
-            request_id.to_owned(),
-            state.session_id.clone(),
-            HostTaskStatus::Failed,
-            Some(state.bytes_written),
-            "checksum_mismatch".to_owned(),
-        );
+        context
+            .state
+            .record_transfer_completed(HostTransferCompletion {
+                request_id: request_id.to_owned(),
+                session_id: state.session_id.clone(),
+                status: HostTaskStatus::Failed,
+                bytes_transferred: Some(state.bytes_written),
+                duration_ms: Some(state.started.elapsed().as_millis() as u64),
+                result: "checksum_mismatch".to_owned(),
+                sha256: Some(actual.clone()),
+                error_message: Some(ErrorCode::ChecksumMismatch.message().to_owned()),
+            });
         append_upload_audit(
             context,
             UploadAudit {
@@ -347,18 +369,23 @@ async fn finalize_upload(
             exit_code: Some(0),
             duration_ms: 0,
             size: Some(state.bytes_written),
-            sha256: Some(actual),
-            summary: Some(format!("wrote {}", state.args.remote_path)),
+            sha256: Some(actual.clone()),
+            summary: Some(format!("wrote {}", path_summary(&state.args.remote_path))),
         },
     )
     .await?;
-    context.state.record_transfer_completed(
-        request_id.to_owned(),
-        state.session_id.clone(),
-        HostTaskStatus::Completed,
-        Some(state.bytes_written),
-        "ok".to_owned(),
-    );
+    context
+        .state
+        .record_transfer_completed(HostTransferCompletion {
+            request_id: request_id.to_owned(),
+            session_id: state.session_id.clone(),
+            status: HostTaskStatus::Completed,
+            bytes_transferred: Some(state.bytes_written),
+            duration_ms: Some(state.started.elapsed().as_millis() as u64),
+            result: "ok".to_owned(),
+            sha256: Some(actual),
+            error_message: None,
+        });
     let details = upload_audit_details(&state.args);
     append_upload_audit(
         context,

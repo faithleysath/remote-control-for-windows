@@ -256,6 +256,7 @@ pub struct FileBinaryFrameReader {
     remaining: u64,
     total_sequences: u32,
     next_sequence: u32,
+    bytes_transferred: u64,
     finished: bool,
     hasher: Sha256Accumulator,
 }
@@ -284,6 +285,7 @@ impl FileBinaryFrameReader {
             remaining: size,
             total_sequences: total_sequences_for_len(size)?,
             next_sequence: 0,
+            bytes_transferred: 0,
             finished: false,
             hasher: Sha256Accumulator::new(),
         })
@@ -325,10 +327,15 @@ impl FileBinaryFrameReader {
         .encode()?;
         self.next_sequence += 1;
         self.remaining -= chunk_len as u64;
+        self.bytes_transferred = self.bytes_transferred.saturating_add(chunk_len as u64);
         if self.remaining == 0 {
             self.finished = true;
         }
         Ok(Some(frame))
+    }
+
+    pub fn bytes_transferred(&self) -> u64 {
+        self.bytes_transferred
     }
 
     pub fn finalize_sha256(self) -> String {

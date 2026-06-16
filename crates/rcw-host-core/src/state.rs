@@ -183,11 +183,21 @@ pub struct HostTransferTaskSnapshot {
     pub finished_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_path_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_path_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub bytes_transferred: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -203,10 +213,15 @@ pub struct HostTunnelSnapshot {
     pub status: TunnelStatus,
     pub opened_at: String,
     pub last_activity_at: String,
+    pub idle_timeout_ms: u64,
+    pub bytes_from_listener: u64,
+    pub bytes_from_target: u64,
     pub active_streams: usize,
     pub total_streams: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub close_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 impl From<TunnelInfo> for HostTunnelSnapshot {
@@ -222,11 +237,38 @@ impl From<TunnelInfo> for HostTunnelSnapshot {
             status: info.status,
             opened_at: info.opened_at,
             last_activity_at: info.last_activity_at,
+            idle_timeout_ms: info.idle_timeout_ms,
+            bytes_from_listener: info.bytes_from_listener,
+            bytes_from_target: info.bytes_from_target,
             active_streams: info.active_streams,
             total_streams: info.total_streams,
+            error_message: (info.status == TunnelStatus::Failed)
+                .then(|| info.close_reason.clone())
+                .flatten(),
             close_reason: info.close_reason,
         }
     }
+}
+
+pub(crate) struct HostTransferStart {
+    pub(crate) request_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) direction: HostTransferDirection,
+    pub(crate) size: Option<u64>,
+    pub(crate) remote_path_summary: Option<String>,
+    pub(crate) local_path_summary: Option<String>,
+    pub(crate) sha256: Option<String>,
+}
+
+pub(crate) struct HostTransferCompletion {
+    pub(crate) request_id: String,
+    pub(crate) session_id: Option<String>,
+    pub(crate) status: HostTaskStatus,
+    pub(crate) bytes_transferred: Option<u64>,
+    pub(crate) duration_ms: Option<u64>,
+    pub(crate) result: String,
+    pub(crate) sha256: Option<String>,
+    pub(crate) error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -634,14 +676,15 @@ impl HostStateHandle {
         );
     }
 
-    pub(crate) fn record_transfer_started(
-        &self,
-        request_id: String,
-        session_id: Option<String>,
-        direction: HostTransferDirection,
-        size: Option<u64>,
-    ) {
+    pub(crate) fn record_transfer_started(&self, transfer: HostTransferStart) {
         let time = now_rfc3339();
+        let request_id = transfer.request_id;
+        let session_id = transfer.session_id;
+        let direction = transfer.direction;
+        let size = transfer.size;
+        let remote_path_summary = transfer.remote_path_summary;
+        let local_path_summary = transfer.local_path_summary;
+        let sha256 = transfer.sha256;
         self.apply(
             HostEvent {
                 time: time.clone(),
@@ -669,9 +712,14 @@ impl HostStateHandle {
                         started_at: time,
                         finished_at: None,
                         size,
+                        remote_path_summary,
+                        local_path_summary,
+                        sha256,
                         bytes_transferred: 0,
+                        duration_ms: None,
                         result: None,
                         summary: None,
+                        error_message: None,
                     },
                 );
             },
@@ -703,15 +751,43 @@ impl HostStateHandle {
         );
     }
 
-    pub(crate) fn record_transfer_completed(
+    pub(crate) fn record_transfer_size(
         &self,
         request_id: String,
         session_id: Option<String>,
-        status: HostTaskStatus,
-        bytes_transferred: Option<u64>,
-        result: String,
+        size: u64,
     ) {
         let time = now_rfc3339();
+        self.apply(
+            HostEvent {
+                time,
+                kind: HostEventKind::TransferProgress,
+                request_id: Some(request_id.clone()),
+                session_id,
+                command: None,
+                status: Some("running".to_owned()),
+                summary: Some(format!("size={size}")),
+            },
+            |inner| {
+                if let Some(transfer) = find_transfer_mut(inner, &request_id) {
+                    transfer.size = Some(size);
+                }
+            },
+        );
+    }
+
+    pub(crate) fn record_transfer_completed(&self, completion: HostTransferCompletion) {
+        let time = now_rfc3339();
+        let request_id = completion.request_id;
+        let session_id = completion.session_id;
+        let status = completion.status;
+        let bytes_transferred = completion.bytes_transferred;
+        let duration_ms = completion.duration_ms;
+        let result = completion.result;
+        let sha256 = completion.sha256;
+        let error_message = completion
+            .error_message
+            .map(|message| redact_reason(&message));
         self.apply(
             HostEvent {
                 time: time.clone(),
@@ -727,8 +803,13 @@ impl HostStateHandle {
                     transfer.status = status;
                     transfer.finished_at = Some(time.clone());
                     transfer.result = Some(result.clone());
+                    transfer.duration_ms = duration_ms;
+                    transfer.error_message = error_message.clone();
                     if let Some(bytes) = bytes_transferred {
                         transfer.bytes_transferred = bytes;
+                    }
+                    if let Some(sha256) = sha256.clone() {
+                        transfer.sha256 = Some(sha256);
                     }
                 }
                 if matches!(status, HostTaskStatus::Failed | HostTaskStatus::Cancelled) {
@@ -736,7 +817,9 @@ impl HostStateHandle {
                         &mut inner.snapshot,
                         HostErrorSnapshot {
                             at: time,
-                            summary: format!("transfer {result}"),
+                            summary: error_message
+                                .clone()
+                                .unwrap_or_else(|| format!("transfer {result}")),
                             request_id: Some(request_id),
                             session_id,
                         },
@@ -793,8 +876,141 @@ impl HostStateHandle {
                 if let Some(tunnel) = find_tunnel_mut(inner, &tunnel_id) {
                     tunnel.status = TunnelStatus::Closed;
                     tunnel.last_activity_at = time;
+                    tunnel.active_streams = 0;
                     tunnel.close_reason = Some(summary);
                 }
+            },
+        );
+    }
+
+    pub(crate) fn record_tunnel_stream_opened(
+        &self,
+        tunnel_id: String,
+        session_id: Option<String>,
+    ) {
+        let time = now_rfc3339();
+        self.apply(
+            HostEvent {
+                time: time.clone(),
+                kind: HostEventKind::TunnelOpened,
+                request_id: None,
+                session_id,
+                command: None,
+                status: Some("active".to_owned()),
+                summary: Some(format!(
+                    "stream opened tunnel={}",
+                    redact_reason(&tunnel_id)
+                )),
+            },
+            |inner| {
+                if let Some(tunnel) = find_tunnel_mut(inner, &tunnel_id) {
+                    tunnel.active_streams = tunnel.active_streams.saturating_add(1);
+                    tunnel.total_streams = tunnel.total_streams.saturating_add(1);
+                    tunnel.last_activity_at = time;
+                }
+            },
+        );
+    }
+
+    pub(crate) fn record_tunnel_stream_closed(
+        &self,
+        tunnel_id: String,
+        session_id: Option<String>,
+        reason: Option<String>,
+    ) {
+        let time = now_rfc3339();
+        self.apply(
+            HostEvent {
+                time: time.clone(),
+                kind: HostEventKind::TunnelClosed,
+                request_id: None,
+                session_id,
+                command: None,
+                status: Some("active".to_owned()),
+                summary: Some(reason.as_deref().map(redact_reason).unwrap_or_else(|| {
+                    format!("stream closed tunnel={}", redact_reason(&tunnel_id))
+                })),
+            },
+            |inner| {
+                if let Some(tunnel) = find_tunnel_mut(inner, &tunnel_id) {
+                    tunnel.active_streams = tunnel.active_streams.saturating_sub(1);
+                    tunnel.last_activity_at = time;
+                }
+            },
+        );
+    }
+
+    pub(crate) fn record_tunnel_bytes(
+        &self,
+        tunnel_id: String,
+        session_id: Option<String>,
+        from_listener: bool,
+        bytes: usize,
+    ) {
+        let time = now_rfc3339();
+        self.apply(
+            HostEvent {
+                time: time.clone(),
+                kind: HostEventKind::TunnelOpened,
+                request_id: None,
+                session_id,
+                command: None,
+                status: Some("active".to_owned()),
+                summary: Some(format!(
+                    "bytes={bytes} tunnel={}",
+                    redact_reason(&tunnel_id)
+                )),
+            },
+            |inner| {
+                if let Some(tunnel) = find_tunnel_mut(inner, &tunnel_id) {
+                    if from_listener {
+                        tunnel.bytes_from_listener =
+                            tunnel.bytes_from_listener.saturating_add(bytes as u64);
+                    } else {
+                        tunnel.bytes_from_target =
+                            tunnel.bytes_from_target.saturating_add(bytes as u64);
+                    }
+                    tunnel.last_activity_at = time;
+                }
+            },
+        );
+    }
+
+    pub(crate) fn record_tunnel_failed(
+        &self,
+        tunnel_id: String,
+        session_id: Option<String>,
+        error_message: String,
+    ) {
+        let time = now_rfc3339();
+        let error_message = redact_reason(&error_message);
+        self.apply(
+            HostEvent {
+                time: time.clone(),
+                kind: HostEventKind::TunnelClosed,
+                request_id: None,
+                session_id: session_id.clone(),
+                command: None,
+                status: Some("failed".to_owned()),
+                summary: Some(error_message.clone()),
+            },
+            |inner| {
+                if let Some(tunnel) = find_tunnel_mut(inner, &tunnel_id) {
+                    tunnel.status = TunnelStatus::Failed;
+                    tunnel.last_activity_at = time.clone();
+                    tunnel.active_streams = 0;
+                    tunnel.error_message = Some(error_message.clone());
+                    tunnel.close_reason = Some("failed".to_owned());
+                }
+                push_error(
+                    &mut inner.snapshot,
+                    HostErrorSnapshot {
+                        at: time,
+                        summary: error_message,
+                        request_id: None,
+                        session_id,
+                    },
+                );
             },
         );
     }
@@ -974,6 +1190,7 @@ fn mark_session_tasks_closed(
         {
             tunnel.status = TunnelStatus::Closed;
             tunnel.last_activity_at = at.to_owned();
+            tunnel.active_streams = 0;
             tunnel.close_reason = Some(result.to_owned());
         }
     }
@@ -1186,24 +1403,36 @@ mod tests {
     fn transfer_progress_updates_transfer_index() {
         let state = state();
 
-        state.record_transfer_started(
-            "up".to_owned(),
-            Some("sess".to_owned()),
-            HostTransferDirection::Upload,
-            Some(10),
-        );
+        state.record_transfer_started(HostTransferStart {
+            request_id: "up".to_owned(),
+            session_id: Some("sess".to_owned()),
+            direction: HostTransferDirection::Upload,
+            size: Some(10),
+            remote_path_summary: Some("basename=file.txt".to_owned()),
+            local_path_summary: None,
+            sha256: Some("abc123".to_owned()),
+        });
         state.record_transfer_progress("up".to_owned(), Some("sess".to_owned()), 5);
-        state.record_transfer_completed(
-            "up".to_owned(),
-            Some("sess".to_owned()),
-            HostTaskStatus::Completed,
-            Some(10),
-            "ok".to_owned(),
-        );
+        state.record_transfer_completed(HostTransferCompletion {
+            request_id: "up".to_owned(),
+            session_id: Some("sess".to_owned()),
+            status: HostTaskStatus::Completed,
+            bytes_transferred: Some(10),
+            duration_ms: Some(30),
+            result: "ok".to_owned(),
+            sha256: Some("def456".to_owned()),
+            error_message: None,
+        });
 
         let snapshot = state.snapshot(totp());
         assert_eq!(snapshot.transfers.len(), 1);
         assert_eq!(snapshot.transfers[0].bytes_transferred, 10);
         assert_eq!(snapshot.transfers[0].status, HostTaskStatus::Completed);
+        assert_eq!(
+            snapshot.transfers[0].remote_path_summary.as_deref(),
+            Some("basename=file.txt")
+        );
+        assert_eq!(snapshot.transfers[0].duration_ms, Some(30));
+        assert_eq!(snapshot.transfers[0].sha256.as_deref(), Some("def456"));
     }
 }

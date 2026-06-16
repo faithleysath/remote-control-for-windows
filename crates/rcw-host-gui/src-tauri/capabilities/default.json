@@ -13,6 +13,8 @@
     "allow-host-copy-connection-info",
     "allow-host-close-current-session",
     "allow-host-cancel-exec-task",
+    "allow-host-cancel-transfer-task",
+    "allow-host-close-tunnel",
     "allow-host-reveal-audit-location",
     "core:event:default"
   ]

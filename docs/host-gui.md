@@ -1,8 +1,8 @@
 # Tauri Host GUI
 
-`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话、Exec 任务、审计和设置页面，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态、结束当前会话、查看/取消运行中的 exec 任务，并浏览当前运行期的事件时间线。
+`rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话、Exec、传输、隧道、审计和设置页面，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态、结束当前会话、查看/取消运行中的 exec 和传输任务、关闭 tunnel，并浏览当前运行期的事件时间线。
 
-当前仍不包含独立 transfer/tunnel 任务页、托盘、安装包或后台自启动。
+当前仍不包含托盘、安装包或后台自启动。
 
 ## 目录
 
@@ -77,6 +77,24 @@ Exec 页显示：
 
 Exec 页不缓存 stdout/stderr 原文；输出正文仍只经由控制端命令结果通道按既有限制处理。
 
+传输页显示：
+
+- 当前和最近的 upload/download 任务列表。
+- request id / task id、session id、direction、状态、开始/结束时间和耗时。
+- remote/local path 摘要，摘要来自 host-core 的脱敏策略，不展示原始路径。
+- size、transferred bytes、progress、speed、sha256、result 和 error 摘要。
+- 复制 request id / task id / path 摘要。
+- 对 running transfer 任务发起 Cancel；GUI 等待 host-core 明确返回控制请求结果后再提示。
+
+隧道页显示：
+
+- 当前和最近的 local/remote tunnel 列表。
+- tunnel id、session id、direction、listen endpoint、target endpoint、status。
+- active stream count、total streams、bytes from listener、bytes from target。
+- opened time、last activity、idle time、idle timeout、close reason 和 error 摘要。
+- 复制 tunnel id / endpoint 摘要。
+- 对 active/opening tunnel 发起 Close；GUI 等待 host-core 明确返回控制请求结果后再提示。
+
 审计页显示：
 
 - 当前运行期 `HostEvent` 历史，默认保留最近 200 条。
@@ -116,6 +134,8 @@ Exec 页不缓存 stdout/stderr 原文；输出正文仍只经由控制端命令
 - `host_copy_connection_info`：通过 host-core/platform 复制连接信息，并返回同一份文本给前端兜底。
 - `host_close_current_session`：请求结束当前 session。
 - `host_cancel_exec_task`：请求取消指定 running exec 任务，只接收 request id，不开放任意进程控制。
+- `host_cancel_transfer_task`：请求取消指定 running upload/download 任务，只接收 request id。
+- `host_close_tunnel`：请求关闭指定 active/opening tunnel，只接收 tunnel id。
 - `host_reveal_audit_location`：用系统文件管理器显示当前 audit 文件位置，不开放通用 shell/fs 调用。
 
 前端没有直接访问协议 socket、文件系统、shell 或底层 Windows API 的入口。后续新增 GUI 操作时，应先在 `rcw-host-core` 暴露明确的控制 API，再通过窄 Tauri command 调用。
@@ -141,6 +161,8 @@ GUI 启动时订阅 `HostService::subscribe_events()`，并通过 Tauri core eve
 - `allow-host-copy-connection-info`
 - `allow-host-close-current-session`
 - `allow-host-cancel-exec-task`
+- `allow-host-cancel-transfer-task`
+- `allow-host-close-tunnel`
 - `allow-host-reveal-audit-location`
 - `core:event:default`
 
