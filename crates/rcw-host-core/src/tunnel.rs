@@ -623,7 +623,7 @@ async fn spawn_stream_pump(
                             match frame.encode() {
                                 Ok(bytes) => {
                                     let mut sink = sink.lock().await;
-                                    if sink.send(Message::Binary(bytes)).await.is_err() {
+                                    if sink.send(Message::Binary(bytes.into())).await.is_err() {
                                         break;
                                     }
                                 }

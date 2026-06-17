@@ -139,7 +139,7 @@ pub(crate) async fn run_host_connection(
                             &sink,
                             &tunnel_streams,
                             &mut uploads,
-                            bytes,
+                            bytes.to_vec(),
                         )
                         .await?;
                     }

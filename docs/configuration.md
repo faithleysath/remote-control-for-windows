@@ -222,7 +222,7 @@ curl https://remote.example.com/healthz
 --version
 ```
 
-输出当前 crate 版本号，例如 `rcwctl 0.1.10`。`rcw-server` 当前没有独立 `--version` 参数；服务启动后可通过 `/healthz` 查看服务名和 `protocol_version`。
+输出当前 crate 版本号，例如 `rcwctl 0.1.11`。`rcw-server` 当前没有独立 `--version` 参数；服务启动后可通过 `/healthz` 查看服务名和 `protocol_version`。
 
 ## 发布包
 

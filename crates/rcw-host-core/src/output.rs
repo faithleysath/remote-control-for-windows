@@ -71,7 +71,7 @@ pub(crate) async fn send_binary_chunks(
     bytes: &[u8],
 ) -> Result<()> {
     for frame in chunk_binary(request_id, kind, bytes)? {
-        sink.send(Message::Binary(frame)).await?;
+        sink.send(Message::Binary(frame.into())).await?;
     }
     Ok(())
 }
@@ -144,7 +144,7 @@ pub(crate) async fn send_error(
 }
 
 pub(crate) async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
-    sink.send(Message::Text(serde_json::to_string(&message)?))
+    sink.send(Message::Text(serde_json::to_string(&message)?.into()))
         .await?;
     Ok(())
 }

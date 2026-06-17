@@ -42,7 +42,7 @@ pub(crate) fn spawn_writer(
                     }
                 }
                 _ = heartbeat.tick() => {
-                    if sender.send(Message::Ping(Vec::new())).await.is_err() {
+                    if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }
                 }
@@ -54,13 +54,13 @@ pub(crate) fn spawn_writer(
 fn outbound_to_ws_message(outbound: Outbound, peer: &str) -> Option<Message> {
     match outbound {
         Outbound::Text(message) => match serde_json::to_string(&message) {
-            Ok(text) => Some(Message::Text(text)),
+            Ok(text) => Some(Message::Text(text.into())),
             Err(err) => {
                 warn!("failed to serialize outbound {peer} message: {err}");
                 None
             }
         },
-        Outbound::Binary(bytes) => Some(Message::Binary(bytes)),
+        Outbound::Binary(bytes) => Some(Message::Binary(bytes.into())),
     }
 }
 

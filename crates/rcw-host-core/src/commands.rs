@@ -943,7 +943,7 @@ async fn send_file_binary_chunks_cancellable(
             return Err(anyhow!("command cancelled"));
         }
         tokio::select! {
-            result = sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)) => {
+            result = sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame.into())) => {
                 result?;
                 send.context.state.record_transfer_progress(
                     send.request_id.to_owned(),
@@ -995,7 +995,7 @@ async fn send_file_binary_chunks_shared_cancellable(
         tokio::select! {
             result = async {
                 let mut sink = sink.lock().await;
-                sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame)).await
+                sink.send(tokio_tungstenite::tungstenite::Message::Binary(frame.into())).await
             } => {
                 result?;
                 send.context.state.record_transfer_progress(

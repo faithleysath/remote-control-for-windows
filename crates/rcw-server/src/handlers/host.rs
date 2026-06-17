@@ -66,7 +66,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         );
         let _ = sender
             .send(Message::Text(
-                serde_json::to_string(&error).unwrap_or_default(),
+                serde_json::to_string(&error).unwrap_or_default().into(),
             ))
             .await;
         return;
@@ -89,7 +89,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         );
         let _ = sender
             .send(Message::Text(
-                serde_json::to_string(&error).unwrap_or_default(),
+                serde_json::to_string(&error).unwrap_or_default().into(),
             ))
             .await;
         return;
@@ -104,7 +104,7 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
         );
         let _ = sender
             .send(Message::Text(
-                serde_json::to_string(&error).unwrap_or_default(),
+                serde_json::to_string(&error).unwrap_or_default().into(),
             ))
             .await;
         return;
@@ -167,7 +167,8 @@ async fn handle_host_socket(socket: WebSocket, state: AppState) {
                 Err(err) => warn!("invalid host message from {}: {err}", hello.machine_id),
             },
             Ok(Message::Binary(bytes)) => {
-                relay_host_binary_response(&state, &hello.host_id, &connection_id, bytes).await;
+                relay_host_binary_response(&state, &hello.host_id, &connection_id, bytes.to_vec())
+                    .await;
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}

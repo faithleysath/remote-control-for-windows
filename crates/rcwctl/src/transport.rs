@@ -605,7 +605,7 @@ async fn send_file_binary_chunks(
             payload: Vec::new(),
         }
         .encode()?;
-        sink.send(Message::Binary(frame)).await?;
+        sink.send(Message::Binary(frame.into())).await?;
         tokio::task::yield_now().await;
         return Ok(());
     }
@@ -630,7 +630,7 @@ async fn send_file_binary_chunks(
             payload: buffer[..chunk_len].to_vec(),
         }
         .encode()?;
-        sink.send(Message::Binary(frame)).await?;
+        sink.send(Message::Binary(frame.into())).await?;
         tokio::task::yield_now().await;
         remaining -= chunk_len as u64;
     }
@@ -646,7 +646,7 @@ pub(crate) async fn connect_control(server: &str) -> Result<(WsSink, WsStream)> 
 }
 
 pub(crate) async fn send_json(sink: &mut WsSink, message: WireMessage) -> Result<()> {
-    sink.send(Message::Text(serde_json::to_string(&message)?))
+    sink.send(Message::Text(serde_json::to_string(&message)?.into()))
         .await?;
     Ok(())
 }
@@ -664,7 +664,7 @@ async fn next_message_during_upload_send(stream: &mut WsStream) -> Result<Incomi
             .ok_or_else(|| anyhow!("server closed control websocket"))??;
         match frame {
             Message::Text(text) => return Ok(IncomingFrame::Text(serde_json::from_str(&text)?)),
-            Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes)),
+            Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes.to_vec())),
             Message::Close(_) => bail!("server closed control websocket"),
             Message::Ping(_) | Message::Pong(_) => {}
             Message::Frame(_) => {}
@@ -686,7 +686,7 @@ pub(crate) async fn next_message(
         .ok_or_else(|| anyhow!("server closed control websocket"))??;
         match frame {
             Message::Text(text) => return Ok(IncomingFrame::Text(serde_json::from_str(&text)?)),
-            Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes)),
+            Message::Binary(bytes) => return Ok(IncomingFrame::Binary(bytes.to_vec())),
             Message::Close(_) => bail!("server closed control websocket"),
             Message::Ping(_) | Message::Pong(_) => {}
             Message::Frame(_) => {}

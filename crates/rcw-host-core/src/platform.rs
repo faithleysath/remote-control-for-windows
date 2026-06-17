@@ -286,7 +286,7 @@ mod windows_impl {
     use windows::{
         core::w,
         Win32::{
-            Foundation::{CloseHandle, GlobalFree, BOOL, HANDLE, HGLOBAL, HWND, LPARAM, RECT},
+            Foundation::{CloseHandle, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, RECT},
             Graphics::Gdi::{
                 BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
                 GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
@@ -367,7 +367,7 @@ mod windows_impl {
         fn open() -> Result<Self> {
             // SAFETY: A null owner HWND is allowed by OpenClipboard. The guard closes the
             // clipboard exactly once on every return path.
-            unsafe { OpenClipboard(null_hwnd()) }
+            unsafe { OpenClipboard(Some(null_hwnd())) }
                 .map_err(|err| anyhow!("OpenClipboard failed: {err}"))?;
             Ok(Self)
         }
@@ -415,7 +415,7 @@ mod windows_impl {
             if self.owned {
                 // SAFETY: The guard owns this handle unless ownership was transferred to the
                 // clipboard by `release_to_clipboard`.
-                let _ = unsafe { GlobalFree(self.handle) };
+                let _ = unsafe { GlobalFree(Some(self.handle)) };
             }
         }
     }
@@ -456,7 +456,7 @@ mod windows_impl {
         fn acquire(hwnd: HWND) -> Result<Self> {
             // SAFETY: GetDC accepts a null HWND to obtain the screen DC. ScreenDc releases the
             // exact HWND/HDC pair in Drop.
-            let hdc = unsafe { GetDC(hwnd) };
+            let hdc = unsafe { GetDC(Some(hwnd)) };
             if hdc.is_invalid() {
                 return Err(anyhow!("GetDC failed"));
             }
@@ -471,7 +471,7 @@ mod windows_impl {
     impl Drop for ScreenDc {
         fn drop(&mut self) {
             // SAFETY: The HWND/HDC pair is the exact pair returned by GetDC.
-            let _ = unsafe { ReleaseDC(self.hwnd, self.hdc) };
+            let _ = unsafe { ReleaseDC(Some(self.hwnd), self.hdc) };
         }
     }
 
@@ -483,7 +483,7 @@ mod windows_impl {
         fn create(source: HDC) -> Result<Self> {
             // SAFETY: `source` is a valid HDC owned by ScreenDc while this call runs. This guard
             // owns the returned compatible DC.
-            let hdc = unsafe { CreateCompatibleDC(source) };
+            let hdc = unsafe { CreateCompatibleDC(Some(source)) };
             if hdc.is_invalid() {
                 return Err(anyhow!("CreateCompatibleDC failed"));
             }
@@ -623,7 +623,7 @@ mod windows_impl {
         // SAFETY: The clipboard is open, `handle` is movable global memory containing unlocked
         // NUL-terminated UTF-16 data, and ownership transfers to the clipboard on success.
         let handle = global.handle();
-        unsafe { SetClipboardData(CF_UNICODETEXT, HANDLE(handle.0)) }
+        unsafe { SetClipboardData(CF_UNICODETEXT, Some(HANDLE(handle.0))) }
             .map_err(|err| anyhow!("SetClipboardData failed: {err}"))?;
         let _ = global.release_to_clipboard();
         Ok(())
@@ -658,7 +658,7 @@ mod windows_impl {
                 0,
                 width,
                 height,
-                screen.hdc(),
+                Some(screen.hdc()),
                 left,
                 top,
                 SRCCOPY,
@@ -711,20 +711,20 @@ mod windows_impl {
     }
 
     pub fn list_windows() -> Result<Vec<WindowInfo>> {
-        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows_core::BOOL {
             // SAFETY: EnumWindows receives this lparam from the call below, where it is a unique
             // mutable pointer to `items` that remains live for the duration of enumeration.
             let items = unsafe { &mut *(lparam.0 as *mut Vec<WindowInfo>) };
             // SAFETY: hwnd is supplied by EnumWindows and is valid for window query APIs during
             // this callback.
             if unsafe { !IsWindowVisible(hwnd).as_bool() } {
-                return BOOL(1);
+                return windows_core::BOOL(1);
             }
             let mut title = vec![0_u16; 512];
             // SAFETY: `title` is a valid writable UTF-16 buffer.
             let len = unsafe { GetWindowTextW(hwnd, &mut title) };
             if len <= 0 {
-                return BOOL(1);
+                return windows_core::BOOL(1);
             }
             title.truncate(len as usize);
             let mut pid = 0_u32;
@@ -735,7 +735,7 @@ mod windows_impl {
             let mut rect = RECT::default();
             // SAFETY: `rect` is a valid output slot.
             if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
-                return BOOL(1);
+                return windows_core::BOOL(1);
             }
             // SAFETY: GetForegroundWindow has no pointer parameters and only reads process-global
             // window state.
@@ -753,7 +753,7 @@ mod windows_impl {
                 visible: true,
                 focused,
             });
-            BOOL(1)
+            windows_core::BOOL(1)
         }
 
         let mut items = Vec::new();

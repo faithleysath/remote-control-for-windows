@@ -1,6 +1,6 @@
 {
   "name": "rcwctl-darwin-arm64",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Prebuilt rcwctl binary for macOS arm64",
   "license": "GPL-3.0-or-later",
   "repository": {

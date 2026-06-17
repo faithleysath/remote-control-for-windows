@@ -61,7 +61,7 @@ async fn handle_control_socket(socket: WebSocket, state: AppState) {
                     &format!("invalid json frame: {err}"),
                 ),
             },
-            Ok(Message::Binary(bytes)) => handle_control_binary(&state, &tx, bytes).await,
+            Ok(Message::Binary(bytes)) => handle_control_binary(&state, &tx, bytes.to_vec()).await,
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
             Err(err) => {

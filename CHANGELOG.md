@@ -4,6 +4,12 @@
 
 ## 未发布
 
+## 0.1.11 - 2026-06-17
+
+- 升级服务端和 WebSocket 依赖到 `axum 0.8` 与 `tokio-tungstenite 0.29`，并适配新版 text/binary frame payload 类型。
+- 升级 Windows API 绑定到 `windows 0.62`，同步更新 clipboard、GDI screenshot 和窗口枚举 FFI 调用签名。
+- 升级配置目录依赖到 `directories 6.0`；本次不改变 wire protocol，协议版本保持 v6。
+
 ## 0.1.10 - 2026-06-16
 
 - GUI 新增 Exec 任务 tab，展示 exec 任务列表、脱敏参数/CWD 摘要、状态、耗时、exit code、stdout/stderr 字节统计和错误摘要，并支持复制 request/session id 与取消 running exec 任务。
