@@ -1,0 +1,7 @@
+interface:
+  display_name: "RCW Test Workflow"
+  short_description: "Route rcw testing to the repo's layers, docs, and pytest scaffold"
+  default_prompt: "Use $rcw-test-workflow to choose the right testing layer and run or extend the remote-control-for-windows repo's pytest-based testing scaffold."
+
+policy:
+  allow_implicit_invocation: true

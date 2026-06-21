@@ -158,6 +158,8 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 - [技术架构](docs/architecture.md)
 - [协议设计](docs/protocol.md)
 - [CLI 参考](docs/cli.md)
+- [调试工作流](docs/debug-workflow.md)
+- [测试工作流](docs/testing.md)
 - [配置说明](docs/configuration.md)
 - [发布流程](docs/release.md)
 - [安全模型](docs/security.md)

@@ -9,7 +9,7 @@ pub(crate) struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Server HTTP/WS endpoint. Defaults to RCW_SERVER or the built-in local endpoint."
+        help = "Server HTTP/WS endpoint. Defaults to RCW_SERVER_URL or the built-in local endpoint."
     )]
     pub(crate) server: Option<String>,
     #[arg(

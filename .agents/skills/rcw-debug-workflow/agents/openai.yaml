@@ -1,0 +1,7 @@
+interface:
+  display_name: "RCW Debug Workflow"
+  short_description: "Route rcw debugging to the repo's validated paths and scripts"
+  default_prompt: "Use $rcw-debug-workflow to debug the remote-control-for-windows repo by following its validated console, MCP, or GUI workflow."
+
+policy:
+  allow_implicit_invocation: true

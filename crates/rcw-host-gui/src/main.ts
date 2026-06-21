@@ -199,6 +199,29 @@ interface HostCopyOutcome {
   };
 }
 
+interface HostGuiAutomationConnectionInfo {
+  server_url: string;
+  machine_id: string;
+  host_id: string;
+  totp: string;
+  totp_period_seconds: number;
+  totp_remaining_seconds: number;
+  listener_status: ListenerStatus;
+  audit_path: string;
+}
+
+interface HostGuiAutomationApi {
+  version: 1;
+  getConnectionInfo(): Promise<HostGuiAutomationConnectionInfo>;
+  getSnapshot(): Promise<HostSnapshot>;
+}
+
+declare global {
+  interface Window {
+    __RCW_HOST_GUI_DEBUG__?: HostGuiAutomationApi;
+  }
+}
+
 interface AppState {
   snapshot: HostSnapshot | null;
   settings: HostSettingsView | null;
@@ -254,6 +277,42 @@ function emptySettingsForm(): SettingsFormState {
     audit_log_path: "",
     auto_listen: true,
   };
+}
+
+function connectionInfoFromSnapshot(snapshot: HostSnapshot): HostGuiAutomationConnectionInfo {
+  return {
+    server_url: snapshot.server_url,
+    machine_id: snapshot.machine_id,
+    host_id: snapshot.host_id,
+    totp: snapshot.totp.current_code,
+    totp_period_seconds: snapshot.totp.period_seconds,
+    totp_remaining_seconds: snapshot.totp.remaining_seconds,
+    listener_status: snapshot.listener.status,
+    audit_path: snapshot.audit_path,
+  };
+}
+
+async function fetchHostSnapshot(): Promise<HostSnapshot> {
+  return invoke<HostSnapshot>("host_snapshot");
+}
+
+function installAutomationApi(): void {
+  const api: HostGuiAutomationApi = Object.freeze({
+    version: 1,
+    async getConnectionInfo(): Promise<HostGuiAutomationConnectionInfo> {
+      return connectionInfoFromSnapshot(await fetchHostSnapshot());
+    },
+    async getSnapshot(): Promise<HostSnapshot> {
+      return fetchHostSnapshot();
+    },
+  });
+
+  Object.defineProperty(window, "__RCW_HOST_GUI_DEBUG__", {
+    configurable: true,
+    enumerable: false,
+    writable: false,
+    value: api,
+  });
 }
 
 function formFromSettings(settings: HostSettingsView): SettingsFormState {
@@ -1654,7 +1713,7 @@ async function refreshSnapshot(): Promise<void> {
   render();
 
   try {
-    state.snapshot = await invoke<HostSnapshot>("host_snapshot");
+    state.snapshot = await fetchHostSnapshot();
     state.events = normalizeSnapshotEvents(state.snapshot.events);
   } catch (error) {
     state.loadError = error instanceof Error ? error.message : String(error);
@@ -1911,4 +1970,5 @@ async function boot(): Promise<void> {
   }, 5_000);
 }
 
+installAutomationApi();
 void boot();

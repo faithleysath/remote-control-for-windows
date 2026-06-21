@@ -1,0 +1,23 @@
+[project]
+name = "rcw-test-harness"
+version = "0.1.0"
+description = "Pytest-based smoke and E2E harness for remote-control-for-windows"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp==1.28.0",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.4,<2",
+  "websockets>=16,<17",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+  "windows_vm: requires the local win11-main VM and interactive desktop path",
+  "smoke: short real-environment liveness checks",
+  "business_e2e: longer product workflow regression coverage",
+]
+
+[tool.uv]
+package = false
