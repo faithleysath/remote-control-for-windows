@@ -14,6 +14,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
       - name: Install Tauri Linux dependencies
         run: |
           sudo apt-get update
@@ -41,7 +51,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: crates/rcw-host-gui/package-lock.json
       - name: Check npm package
         working-directory: npm
         run: |
