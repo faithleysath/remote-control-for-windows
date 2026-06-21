@@ -47,7 +47,7 @@ git push origin v0.1.11
    npm --prefix crates/rcw-host-gui run tauri:build:windows:x64
    ```
 
-5. 按 [testing.md](testing.md) 运行或刷新 Windows 交互桌面 E2E smoke。
+5. 运行或刷新 Windows 交互桌面 E2E smoke，并保留本轮验证结论。
 6. 确认发布产物不需要任何 secret 或本地配置文件。
 7. 确认 Linux builder 上存在 `llvm-rc`；Tauri Windows GUI 构建需要它生成 Windows resource。
 8. 确认 `CHANGELOG.md` 中的版本号与要推送的 tag 一致。
@@ -180,4 +180,4 @@ npm packages:
   rcwctl --version
   ```
 
-- 新发现的运行时缺口应写入 `docs/testing.md` 或 `docs/roadmap.md`，不要只留在聊天记录里。
+- 新发现的运行时缺口应写入重写后的测试文档或 `docs/project-scope.md`，不要只留在聊天记录里。

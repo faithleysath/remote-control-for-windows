@@ -1,15 +1,8 @@
 # Remote Control for Windows
 
-`remote-control-for-windows` 是一套临时、可见、可审计的 Windows 远程协助工具。它面向授权支持场景，让研发、运维或 Codex agent 可以通过命令行完成诊断、文件传输、截图和基础 GUI 操作。
+`remote-control-for-windows` 是一套面向明确授权场景的 Windows 远控产品基线。当前已实现的是可见、可审计的临时协助 / TOTP 模式；后续会在不打破现有安全边界的前提下扩展到显式启用的长期配对和常驻可连接模式。
 
-当前 workspace 版本是 `0.1.11`，协议版本是 `v6`。项目已经从 v1 的从零实现阶段进入长期维护和迭代阶段；主链路已经在真实 Windows VM 中完成主要闭环验证，后续工作应在保持当前安全模型的前提下继续强化打包、自动化验证和操作体验。
-
-## 定位
-
-- `rcw-host.exe` 运行在可见的 Windows 控制台里，关闭窗口即终止远控。
-- `rcw-server` 只负责 host/control 中继、状态管理和审计。
-- `rcwctl` 是研发和 agent 使用的短生命周期控制端。
-- MCP 模式把连接状态和后台传输任务放在进程内存里，不污染普通 CLI 会话文件。
+当前 workspace 版本是 `0.1.11`，协议版本是 `v6`。
 
 ## 组件
 
@@ -19,41 +12,23 @@
 - `rcwctl`：研发、脚本或 Codex agent 使用的控制端 CLI。
 - `rcw-common`：共享协议、ID、TOTP、审计、配置和传输逻辑。
 
+当前基线已经覆盖会话建立、命令执行、文件传输、截图、窗口枚举、鼠标键盘输入、server-owned 后台 exec、TCP tunnel 和 MCP 进程内任务状态；更细的产品边界见 [docs/project-scope.md](docs/project-scope.md)。
+
+## 运行模型
+
 ```text
 rcwctl  <--WebSocket-->  rcw-server  <--WebSocket-->  rcw-host.exe
 ```
 
-所有连接都由 host/control 侧主动发起。被控端上线不需要控制端 token；控制端必须同时持有服务端控制 token 和被控端当前 TOTP，才能打开会话。
+所有连接都由 host/control 侧主动发起。当前临时协助模式下，被控端上线不需要控制端 token；控制端必须同时持有服务端控制 token 和被控端当前 TOTP，才能打开会话。session token 始终是短期的；MCP 模式把 session、传输任务和 tunnel manager 状态保存在进程内存里，不污染普通 CLI 会话文件。
 
-## 当前状态
+## 安全边界
 
-当前代码主链路已经实现，`0.1.6` 在 2026-06-14 完成过 Windows VM 实机完整 E2E，`0.1.7` 追加完成 125% DPI host 侧修复验证，`0.1.8` 增加协议 v5 TCP tunnel 并完成本地 Linux 正反向转发 smoke：
+- 当前 `rcw-host.exe` 必须保持为可见进程，关闭窗口即结束临时协助模式。
+- 产品不做静默控制、自动提权、UAC 绕过、隐藏进程或退出后后台驻留。
+- 剪贴板连接信息和默认审计摘要不包含 control token、session token、TOTP seed 或其他长期凭据。
 
-- 本地 Rust 检查：`cargo fmt --check`、`cargo test --workspace`、`cargo clippy --workspace -- -D warnings`。
-- Linux 上通过 `cargo-xwin` 交叉构建静态 CRT 的 Windows 被控端。
-- Windows VM 实机 E2E：会话 `connect/status/disconnect`、错误 token/TOTP、`HostBusy`、force reconnect、运行期 `host_id` 精确连接、host 单实例锁、命令执行、同 session 并发、后台 exec 查询/取消、命令超时清理、上传/下载 SHA-256、MCP 文件传输后台任务和取消、窗口枚举、截图、鼠标移动/点击/滚轮、键盘文本和按键输入、剪贴板安全边界、防休眠/防熄屏请求、旧 session 失效、server/host 审计日志。
-- Windows VM 125% DPI 修复验证：screenshot 输出物理 1920x1080 全尺寸、`Control+End` 正常执行、MCP 坐标和 Windows 实际点击坐标在靶场中一致。
-- 本地 Linux tunnel smoke：`rcwctl forward -L` 和 `rcwctl forward -R` 均通过 TCP echo 验证；真实 Windows host E2E 尚未刷新。
-
-详细 E2E 记录见 [docs/e2e-v0.1.6.md](docs/e2e-v0.1.6.md) 和 [docs/e2e-v0.1.7.md](docs/e2e-v0.1.7.md)。
-
-仍需补齐的早期验证项：
-
-- 在真实标准用户交互桌面中启动 `rcw-host.exe`，最终确认控制台显示 `Privilege: standard user`。管理员 elevated 桌面行为已经验证通过。
-
-## 安全模型
-
-这个工具明确不是静默远控工具：
-
-- Windows 被控端是可见控制台进程。
-- 关闭被控端窗口即终止控制。
-- 被控端不安装服务、不写入启动项、不隐藏自身、不在退出后驻留。
-- 被控端不自动提权，也不绕过 UAC。
-- 被控端控制台显示当前权限状态和操作摘要。
-- 剪贴板连接信息不包含控制端 token、session token、TOTP seed 或原始机器标识。
-- host、controller、server 三端都记录审计日志。
-
-完整安全边界见 [docs/security.md](docs/security.md)。
+完整边界见 [docs/security.md](docs/security.md)。
 
 ## 快速开始
 
@@ -126,9 +101,9 @@ rcwctl --json exec -- pwsh -NoProfile -Command "hostname"
 }
 ```
 
-MCP 模式下先调用 `connect` 打开远控会话，再调用 `exec`、`screenshot`、`windows`、鼠标键盘和文件传输工具。`exec` 默认远端运行上限为 24 小时，单次 tool call 默认等待 90 秒；未完成时返回 server-owned `task_id`，后续可用 `exec_status` 查询或 `exec_cancel` 取消。agent 发送或接收文件使用 `upload` / `download` 这类路径型工具，让 MCP 服务器自己流式读写本机文件；文件主体走 WebSocket binary frame，不走 base64。`upload` / `download` 默认等待 60 秒，未完成就返回 MCP 进程内 `task_id`，后续用 `transfer_status` 查询。MCP 进程只在内存中保存 session 和后台传输任务状态，不写普通 CLI 的本地 session 文件。
+MCP 模式下先调用 `connect` 打开远控会话，再调用 `exec`、`screenshot`、`windows`、鼠标键盘和文件传输工具。`exec` 默认远端运行上限为 24 小时，单次 tool call 默认等待 90 秒；`upload` / `download` 默认等待 60 秒；未完成时都改为返回可继续查询的任务 ID。更完整的 CLI/MCP 约定见 [docs/cli.md](docs/cli.md)。
 
-## 构建
+## 构建与检查
 
 本地 Linux 构建：
 
@@ -155,8 +130,6 @@ target/x86_64-pc-windows-msvc/release/rcw-host.exe
 
 静态 CRT 构建可以避免干净 Windows 环境缺少 VC++ 运行库。
 
-## 开发检查
-
 提交变更前至少运行：
 
 ```bash
@@ -174,9 +147,11 @@ RUSTFLAGS='-C target-feature=+crt-static' \
   cargo xwin build -p rcw-host --target x86_64-pc-windows-msvc --release
 ```
 
+发布产物、目标平台和发布校验见 [docs/release.md](docs/release.md)。
+
 ## 文档导航
 
-根目录 `README.md` 是项目首页，面向第一次进入仓库的人；`docs/README.md` 是文档目录索引，面向需要深入查阅设计、测试、发布和维护资料的人。两者不是重复正文，职责不同。
+根目录 `README.md` 负责入口说明；`docs/README.md` 负责文档索引。
 
 - [文档索引](docs/README.md)
 - [项目范围](docs/project-scope.md)
@@ -184,9 +159,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 - [协议设计](docs/protocol.md)
 - [CLI 参考](docs/cli.md)
 - [配置说明](docs/configuration.md)
-- [测试与验证](docs/testing.md)
 - [发布流程](docs/release.md)
-- [路线图](docs/roadmap.md)
 - [安全模型](docs/security.md)
 - [Windows 实现说明](docs/windows-apis.md)
 

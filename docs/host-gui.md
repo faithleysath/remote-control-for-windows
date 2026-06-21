@@ -2,7 +2,7 @@
 
 `rcw-host-gui` 是 Windows host 的 Tauri v2 图形界面工程。当前 MVP 提供概览、会话、Exec、传输、隧道、审计和设置页面，让 host 用户可以在 GUI 内查看连接信息、复制 TOTP、控制监听状态、结束当前会话、查看/取消运行中的 exec 和传输任务、关闭 tunnel，并浏览当前运行期的事件时间线。
 
-当前仍不包含托盘、安装包或后台自启动。
+当前仍不包含托盘、安装包或后台自启动。本文只描述 GUI 的页面范围、command 边界和 capability 约束；构建与发布命令统一放在 [release.md](release.md)。
 
 ## 目录
 
@@ -23,15 +23,7 @@ npm ci
 npm run tauri:dev
 ```
 
-Windows release exe 从 Linux 构建时使用 package script 固化的 Tauri + cargo-xwin 命令：
-
-```bash
-cd crates/rcw-host-gui
-npm run tauri:build:windows:x64
-npm run tauri:build:windows:arm64
-```
-
-GUI 依赖 Tauri/WebView2，不启用 `RUSTFLAGS='-C target-feature=+crt-static'`。控制台 `rcw-host.exe` 仍使用静态 CRT 构建；GUI 产物需要按 Windows 桌面应用方式验证 WebView2 和 MSVC CRT 运行时环境。
+Windows release exe 从 Linux 构建时使用 package script 固化的 Tauri + cargo-xwin 流程。GUI 依赖 Tauri/WebView2，不启用 `crt-static`；具体构建命令和发布校验见 [release.md](release.md)。
 
 GUI 复用 `rcw-host-core` 的配置解析：
 

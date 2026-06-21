@@ -504,7 +504,7 @@ pub struct KeyboardKeyArgs {
     pub key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RectInfo {
     pub left: i32,
     pub top: i32,
@@ -512,7 +512,7 @@ pub struct RectInfo {
     pub bottom: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct WindowInfo {
     pub handle: String,
     pub title: String,

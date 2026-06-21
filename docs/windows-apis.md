@@ -1,8 +1,8 @@
-# Windows API 清单
+# Windows 实现说明
 
 ## 目标
 
-本文列出 `rcw-host.exe` 当前用到的 Windows 能力、实现 API、注意事项和限制。实现优先使用 Rust `windows` crate 绑定 Win32 API。
+本文只描述 `rcw-host` 当前依赖的 Windows 能力、实现 API 和平台限制，不重复产品范围、安全目标或发布流程。实现优先使用 Rust `windows` crate 绑定 Win32 API。
 
 ## 机器 ID
 
@@ -276,3 +276,5 @@ DPI：
 - v1 不做控件识别、OCR、UI Automation。
 - v1 不做视频流。
 - v1 不安装驱动、不注入进程、不常驻。
+
+安全目标见 [security.md](security.md)，构建与发布约束见 [release.md](release.md)。

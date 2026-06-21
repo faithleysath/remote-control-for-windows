@@ -132,7 +132,7 @@ pub(crate) struct ScreenshotFileResult {
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct WindowsResult {
     pub(crate) ok: bool,
-    pub(crate) windows: Value,
+    pub(crate) windows: Vec<WindowInfo>,
     pub(crate) request_id: String,
 }
 
@@ -802,8 +802,7 @@ pub(crate) async fn windows(cli: &Cli, request_id: &str) -> Result<i32> {
     if cli.json {
         print_json(serde_json::to_value(&result)?)?;
     } else {
-        let windows: Vec<WindowInfo> = serde_json::from_value(result.windows)?;
-        for window in windows {
+        for window in result.windows {
             println!(
                 "{} pid={} visible={} focused={} title={}",
                 window.handle, window.process_id, window.visible, window.focused, window.title
@@ -830,7 +829,7 @@ pub(crate) async fn windows_state(
         )
         .await?;
     let complete = response.complete.context("missing command.complete")?;
-    let windows: Value = serde_json::from_str(&response.json_stream)?;
+    let windows: Vec<WindowInfo> = serde_json::from_str(&response.json_stream)?;
     Ok(WindowsResult {
         ok: complete.ok,
         windows,
