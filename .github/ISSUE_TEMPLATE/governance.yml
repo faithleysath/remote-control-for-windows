@@ -1,0 +1,81 @@
+name: Governance / Workflow
+description: 记录开发、调试、测试、CI、文档或协作流程治理项
+title: "[Governance] "
+labels:
+  - documentation
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 当前流程痛点或治理缺口是什么
+      placeholder: |
+        例：
+        - 当前没有统一的 PR 证据格式
+        - main 仍可能被直接开发
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 这次治理项打算建立什么规则、入口或脚手架
+      placeholder: |
+        例：
+        - 建立 issue / PR / worktree 默认工作流
+    validations:
+      required: true
+  - type: textarea
+    id: non_goal
+    attributes:
+      label: 非目标
+      description: 这次明确不顺带推进哪些事项
+      placeholder: |
+        例：
+        - 不直接改造所有历史 issue
+        - 不一次性补齐所有自动化
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 现状 / 约束
+      description: 当前仓库已有基础、外部依赖、GitHub 设置限制
+      placeholder: |
+        例：
+        - docs/debug-workflow.md 与 docs/testing.md 已存在
+        - branch protection 需要仓库设置配合
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      placeholder: |
+        例：
+        - 仓库内有统一入口文档
+        - 模板落库
+        - skill 与文档边界清楚
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 验证方式
+      description: 如何确认治理项真的可用，而不只是写了文档
+      placeholder: |
+        例：
+        - 用一个真实 issue/PR 流转一遍
+        - agent 按 skill 能找到正确入口
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险 / 依赖
+      placeholder: |
+        例：
+        - 依赖后续手动开启 branch protection
+        - 旧习惯可能在迁移期继续存在
+    validations:
+      required: false

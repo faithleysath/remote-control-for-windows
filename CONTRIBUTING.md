@@ -30,6 +30,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 
 ## 改动要求
 
+- 需求、Bug、治理项默认先进入 issue；日常开发默认在 worktree + branch 中完成，并通过 PR 合入 `main`。具体规则见 `docs/dev-workflow.md`。
 - 协议改动默认保持向后兼容；确实破坏兼容时必须明确提升协议版本。
 - 不记录完整控制端 token、session token、TOTP seed、原始机器 ID、剪贴板内容或文件内容。
 - 保持被控端可见行为：当前控制台状态、权限显示、操作摘要和关闭窗口即终止控制；后续若增加常驻模式，也必须保持显式启用、状态可见、可撤销。

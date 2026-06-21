@@ -154,6 +154,7 @@ RUSTFLAGS='-C target-feature=+crt-static' \
 根目录 `README.md` 负责入口说明；`docs/README.md` 负责文档索引。
 
 - [文档索引](docs/README.md)
+- [开发工作流](docs/dev-workflow.md)
 - [项目范围](docs/project-scope.md)
 - [技术架构](docs/architecture.md)
 - [协议设计](docs/protocol.md)
