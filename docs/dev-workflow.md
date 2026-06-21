@@ -169,6 +169,7 @@ worktree 目录建议与 branch 对应，例如：
 
 PR 正文至少应说明：
 
+- 使用 `Closes #...`、`Fixes #...` 或同类关键词关闭对应 issue
 - 关联 issue
 - 改了什么
 - 没改什么
