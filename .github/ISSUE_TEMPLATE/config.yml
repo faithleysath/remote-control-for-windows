@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: RCW 文档入口
+    url: https://github.com/faithleysath/remote-control-for-windows/blob/main/docs/README.md
+    about: 先看仓库内长期文档入口，再决定是提 bug、feature 还是治理 issue

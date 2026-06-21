@@ -15,6 +15,7 @@
 
 ## 运行与发布
 
+- [开发工作流](dev-workflow.md)：issue、worktree、PR、merge 和验证证据的默认协作路径。
 - [配置说明](configuration.md)：环境变量、嵌入配置、本地状态路径和部署入口。
 - [调试工作流](debug-workflow.md)：本机 + Windows VM 的真实可用调试路径、脚本入口和证据要求。
 - [测试工作流](testing.md)：测试分层、门禁、业务覆盖矩阵和当前 `pytest` smoke/E2E 脚手架。

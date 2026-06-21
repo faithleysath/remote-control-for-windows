@@ -1,0 +1,82 @@
+name: Feature / Change
+description: 记录一个新功能、能力扩展或可执行的产品/技术改动
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 需求来自哪里，为什么现在要做
+      placeholder: |
+        例：
+        - 控制端需要增加新的 Windows 运维能力
+        - 当前 CLI/MCP 尚无对应入口
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 这次要交付什么，不要写成泛泛愿景
+      placeholder: |
+        例：
+        - 新增一个 CLI 子命令和对应 MCP 工具
+    validations:
+      required: true
+  - type: textarea
+    id: non_goal
+    attributes:
+      label: 非目标
+      description: 这次明确不做什么，避免范围失控
+      placeholder: |
+        例：
+        - 不在这次里补全所有 GUI 入口
+        - 不改动协议版本
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 现状 / 约束
+      description: 当前实现、边界、兼容性、安全或平台限制
+      placeholder: |
+        例：
+        - 当前仅有 console host 路径
+        - 必须保持现有授权和审计边界
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      placeholder: |
+        例：
+        - CLI 命令可用
+        - MCP 工具可调用
+        - 对应文档和测试补齐
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 验证方式
+      description: 计划用什么层次的验证关闭风险
+      placeholder: |
+        例：
+        - cargo test / clippy
+        - pytest smoke
+        - win11-main 真实调试路径
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险 / 依赖
+      placeholder: |
+        例：
+        - 依赖 host/server/control 三端协议一致
+        - 可能影响既有错误码语义
+    validations:
+      required: false

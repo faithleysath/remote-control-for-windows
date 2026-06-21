@@ -1,0 +1,80 @@
+name: Bug
+description: 报告一个行为错误、回归或稳定性问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 这是什么场景下发现的问题，为什么值得修
+      placeholder: |
+        例：
+        - 在 GUI host 调试路径中发现启动后立即 panic
+        - 这是当前 debug workflow 的阻塞项
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: 问题现象
+      description: 具体错误、日志、截图、输出摘要
+      placeholder: |
+        例：
+        - stderr: expected value at line 1 column 1
+        - Windows 侧 9222 未监听
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: |
+        例：
+        - GUI host 应正常启动并暴露 CDP page target
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 现状 / 约束
+      description: 影响范围、环境、已知前提、排查线索
+      placeholder: |
+        例：
+        - 仅在 Windows PowerShell 5.1 写入配置时复现
+        - console host 正常，GUI host 异常
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      placeholder: |
+        例：
+        - 同一配置下 GUI host 可成功启动
+        - smoke 或最小调试链路可复现通过
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 验证方式
+      description: 打算用什么测试或调试路径证明修复成立
+      placeholder: |
+        例：
+        - crate 级测试
+        - docs/debug-workflow.md 中的 GUI/CDP 路径
+        - tests/e2e/test_gui_cdp_smoke.py
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险 / 依赖
+      placeholder: |
+        例：
+        - 可能影响 host-gui 配置读取兼容性
+        - 依赖 win11-main 交互桌面验证
+    validations:
+      required: false

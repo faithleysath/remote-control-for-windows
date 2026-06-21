@@ -1,0 +1,7 @@
+interface:
+  display_name: "RCW Task Workflow"
+  short_description: "Route rcw issue, PR, and worktree flow to repo rules"
+  default_prompt: "Use $rcw-task-workflow to plan or execute repository task flow in the remote-control-for-windows repo."
+
+policy:
+  allow_implicit_invocation: true
